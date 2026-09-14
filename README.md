@@ -99,10 +99,10 @@ The current implementation encompasses **fully working, tested, and executable m
 
 | Module | Source File | Status | Technical Functionality |
 | :--- | :--- | :---: | :--- |
-| **Linguistic Preprocessing & Switch Distance** | [`backend/preprocessing.py`](backend/preprocessing.py) | **Operational** | Lexicon-based & character-ngram language identification (`hi` vs `en`), subword alignment, and signed switch distance calculation $\delta_i \in [-5, +5]$. |
-| **Dataset & Dynamic Batching** | [`backend/dataset.py`](backend/dataset.py) | **Operational** | PyTorch Dataset & custom `collate_fn` constructing 2D span ground-truth matrices, attention masks, and continuous VA targets. |
-| **Switch-Gated Attention (SP-GSA)** | [`backend/model.py`](backend/model.py) | **Operational** | Learned embedding layer for boundary distances coupled with adaptive sigmoid gating $\mathbf{g}_i \odot \mathbf{h}_i$ to model affective modulation at switch points. |
-| **Biaffine Span Extractors** | [`backend/model.py`](backend/model.py) | **Operational** | Bilinear scoring heads $\mathbf{S}_{ij} = (\mathbf{W}_s \mathbf{h}_i)^\top \mathbf{U} (\mathbf{W}_e \mathbf{h}_j)$ generating upper-triangular span logits for aspects and opinions. |
+| **Linguistic Preprocessing & Switch Distance** | [`backend/preprocessing.py`](backend/preprocessing.py) | **Operational** | Lexicon-based and character-ngram language identification (`hi` vs `en`), subword alignment, and signed switch distance calculation ($\delta_i \in [-5, +5]$). |
+| **Dataset & Dynamic Batching** | [`backend/dataset.py`](backend/dataset.py) | **Operational** | PyTorch Dataset and custom `collate_fn` constructing 2D span ground-truth matrices, attention masks, and continuous VA targets. |
+| **Switch-Gated Attention (SP-GSA)** | [`backend/model.py`](backend/model.py) | **Operational** | Learned embedding layer for boundary distances coupled with adaptive sigmoid gating to model affective modulation at switch points. |
+| **Biaffine Span Extractors** | [`backend/model.py`](backend/model.py) | **Operational** | Bilinear scoring heads generating upper-triangular span logits for aspects and opinions. |
 | **4-Relational Graph & RGAT** | [`backend/model.py`](backend/model.py) | **Operational** | Heterogeneous graph construction (Sequential, Self-Loop, Switch Boundary, Aspect-Opinion cross links) processed by a 2-layer Relational Graph Attention Network. |
 | **Cross-Attention Fusion** | [`backend/model.py`](backend/model.py) | **Operational** | Multi-head cross-attention mechanism aligning token-level contextual representations with RGAT structural representations. |
 | **Continuous Affect Regressors** | [`backend/model.py`](backend/model.py) | **Operational** | Multi-Layer Perceptron heads predicting continuous Valence and Arousal scores with Sigmoid activation $[0.0, 1.0]$. |
@@ -126,26 +126,66 @@ Current Executable Implementation:
 ### Mathematical Formulations
 
 #### 1. Switch-Gated Self-Attention (SP-GSA)
+
 Given contextual hidden vectors $\mathbf{h}_i \in \mathbb{R}^H$ from Hing-RoBERTa and signed distance to the nearest switch point $\delta_i \in \{-5, \dots, +5\}$:
-$$\mathbf{e}_{\delta_i} = \text{Embedding}(\delta_i + 5) \in \mathbb{R}^H$$
-$$\mathbf{g}_i = \sigma\left(\mathbf{W}_g [\mathbf{h}_i \,\|\, \mathbf{e}_{\delta_i}] + \mathbf{b}_g\right)$$
-$$\mathbf{h}_i' = \mathbf{h}_i + \mathbf{g}_i \odot \mathbf{h}_i$$
+
+$$
+\mathbf{e}_{\delta_i} = \text{Embedding}(\delta_i + 5) \in \mathbb{R}^H
+$$
+
+$$
+\mathbf{g}_i = \sigma\left(\mathbf{W}_g [\mathbf{h}_i \parallel \mathbf{e}_{\delta_i}] + \mathbf{b}_g\right)
+$$
+
+$$
+\mathbf{h}_i' = \mathbf{h}_i + \mathbf{g}_i \odot \mathbf{h}_i
+$$
 
 #### 2. Biaffine Span Scoring
-For start token $i$ and end token $j$ ($i \le j$):
-$$\mathbf{s}_i = \mathbf{W}_{\text{start}} \mathbf{h}_i', \quad \mathbf{e}_j = \mathbf{W}_{\text{end}} \mathbf{h}_j'$$
-$$\mathbf{S}_{i, j} = \mathbf{s}_i^\top \mathbf{U} \mathbf{e}_j + \mathbf{b}$$
-Where $\mathbf{U} \in \mathbb{R}^{H \times H}$ is a learned bilinear tensor initialized via Xavier Uniform initialization.
+
+For start token $i$ and end token $j$ where $i \le j$:
+
+$$
+\mathbf{s}_i = \mathbf{W}_{\text{start}} \mathbf{h}_i', \quad \mathbf{e}_j = \mathbf{W}_{\text{end}} \mathbf{h}_j'
+$$
+
+$$
+\mathbf{S}_{i, j} = \mathbf{s}_i^\top \mathbf{U} \mathbf{e}_j + \mathbf{b}
+$$
+
+Where $\mathbf{U} \in \mathbb{R}^{H \times H}$ is a learned bilinear parameter tensor initialized via Xavier Uniform initialization.
 
 #### 3. 4-Relational Graph Attention Network (RGAT)
-Graph $\mathcal{G} = (\mathcal{V}, \mathcal{E}, \mathcal{R})$ consists of 4 edge relation types:
-$$\mathcal{R} \in \{\text{Sequential}(0), \text{Self-Loop}(1), \text{Switch-Boundary}(2), \text{Aspect-Opinion}(3)\}$$
-The relational attention coefficient $\alpha_{ij}$ from token $j$ to token $i$ is:
-$$\alpha_{ij} = \frac{\exp\left(\text{LeakyReLU}\left(\mathbf{a}^\top [\mathbf{W}_r \mathbf{h}_i \,\|\, \mathbf{W}_r \mathbf{h}_j \,\|\, \mathbf{e}_{r_{ij}}]\right)\right)}{\sum_{k \in \mathcal{N}(i)} \exp\left(\text{LeakyReLU}\left(\mathbf{a}^\top [\mathbf{W}_r \mathbf{h}_i \,\|\, \mathbf{W}_r \mathbf{h}_k \,\|\, \mathbf{e}_{r_{ik}}]\right)\right)}$$
+
+Graph $\mathcal{G} = (\mathcal{V}, \mathcal{E}, \mathcal{R})$ consists of 4 distinct edge relation types:
+
+$$
+\mathcal{R} \in \{\text{Sequential}(0), \text{Self-Loop}(1), \text{Switch-Boundary}(2), \text{Aspect-Opinion}(3)\}
+$$
+
+The relational attention coefficient $\alpha_{ij}$ from token $j$ to token $i$ across neighborhood $\mathcal{N}(i)$ is formulated as:
+
+$$
+\alpha_{ij} = \frac{\exp\left(\text{LeakyReLU}\left(\mathbf{a}^\top [\mathbf{W}_r \mathbf{h}_i \parallel \mathbf{W}_r \mathbf{h}_j \parallel \mathbf{e}_{r_{ij}}]\right)\right)}{\sum_{k \in \mathcal{N}(i)} \exp\left(\text{LeakyReLU}\left(\mathbf{a}^\top [\mathbf{W}_r \mathbf{h}_i \parallel \mathbf{W}_r \mathbf{h}_k \parallel \mathbf{e}_{r_{ik}}]\right)\right)}
+$$
 
 #### 4. Lin's Concordance Correlation Coefficient (CCC) Loss
-$$\text{CCC}(\hat{y}, y) = \frac{2 \cdot \text{Cov}(\hat{y}, y)}{\sigma_{\hat{y}}^2 + \sigma_y^2 + (\mu_{\hat{y}} - \mu_y)^2}$$
-$$\mathcal{L}_{\text{CCC}} = 1.0 - \text{CCC}(\hat{y}, y)$$
+
+$$
+\text{CCC}(\hat{y}, y) = \frac{2 \cdot \text{Cov}(\hat{y}, y)}{\sigma_{\hat{y}}^2 + \sigma_y^2 + (\mu_{\hat{y}} - \mu_y)^2}
+$$
+
+$$
+\mathcal{L}_{\text{CCC}} = 1.0 - \text{CCC}(\hat{y}, y)
+$$
+
+#### 5. Unified Multi-Task Objective
+
+$$
+\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{span}} + 0.5 \cdot \mathcal{L}_{\text{regression}} + 0.5 \cdot \mathcal{L}_{\text{CCC}}^{\text{Valence}} + 0.5 \cdot \mathcal{L}_{\text{CCC}}^{\text{Arousal}}
+$$
+
+---
 
 ### Hyperparameter Specifications
 
@@ -211,7 +251,13 @@ Total Loss
 ### Justification of Critical Architectural Decisions
 
 #### Q1: Why use Switch-Gated Self-Attention (SP-GSA) instead of standard Transformer self-attention?
-> **Justification:** In code-mixed Hinglish, sentiment intensity and polarity inversions occur disproportionately at or near language switch boundaries (e.g., transitioning from an English technical term to an expressive Hindi adjective). Standard multi-head self-attention treats all token transitions uniformly based purely on word semantics. SP-GSA explicitly injects a **signed distance embedding $\delta_i \in [-5, +5]$** to the nearest switch point, allowing the gating mechanism $\mathbf{g}_i = \sigma(\mathbf{W} [\mathbf{h}_i \,\|\, \mathbf{e}_{\delta_i}])$ to dynamically amplify or suppress features in the vicinity of language transitions.
+> **Justification:** In code-mixed Hinglish, sentiment intensity and polarity inversions occur disproportionately at or near language switch boundaries (e.g., transitioning from an English technical term to an expressive Hindi adjective). Standard multi-head self-attention treats all token transitions uniformly based purely on word semantics. SP-GSA explicitly injects a **signed distance embedding** $\delta_i \in [-5, +5]$ to the nearest switch point, allowing the gating mechanism:
+> 
+> $$
+> \mathbf{g}_i = \sigma\left(\mathbf{W}_g [\mathbf{h}_i \parallel \mathbf{e}_{\delta_i}] + \mathbf{b}_g\right)
+> $$
+> 
+> to dynamically amplify or suppress features in the vicinity of language transitions.
 
 #### Q2: Why use a 4-Relational Graph Attention Network (RGAT) over a standard GCN or GAT?
 > **Justification:** Different token connections carry fundamentally different syntactic and affective semantics:
@@ -219,6 +265,7 @@ Total Loss
 > 2. Self-loops preserve individual token identity.
 > 3. Language boundary edges model inter-lingual transitions.
 > 4. Aspect-Opinion edges directly pass sentiment message gradients between targets and descriptors.
+> 
 > A standard homogeneous GCN/GAT compresses all edge types into a single scalar weight, losing the semantic distinction. Our RGAT assigns distinct learnable relation embeddings $\mathbf{e}_{r}$, maintaining relational hierarchy.
 
 #### Q3: Why continuous 2D Valence-Arousal (VA) instead of 3-class discrete classification (Positive / Negative / Neutral)?
@@ -227,6 +274,7 @@ Total Loss
 > - $V < 0.5, A \ge 0.5 \implies$ **Q2: Frustrated / Angry**
 > - $V < 0.5, A < 0.5 \implies$ **Q3: Sad / Disappointed**
 > - $V \ge 0.5, A < 0.5 \implies$ **Q4: Calm / Content**
+> 
 > This enables multi-dimensional granular affective intelligence.
 
 #### Q4: Why include Lin's Concordance Correlation Coefficient (CCC) in the loss?
