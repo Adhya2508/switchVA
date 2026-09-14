@@ -1,11 +1,13 @@
 # 🎯 SwitchVA: Dimensional Aspect-Based Sentiment & Emotion Analysis for Code-Mixed Hinglish
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-switchva.streamlit.app-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://switchva.streamlit.app/)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C.svg?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![Hugging Face](https://img.shields.io/badge/Transformers-Hing--RoBERTa-yellow.svg?style=for-the-badge&logo=huggingface&logoColor=white)](https://huggingface.co/l3cube-pune/hing-roberta)
-[![Streamlit](https://img.shields.io/badge/Streamlit-1.30%2B-FF4B4B.svg?style=for-the-badge&logo=streamlit&logoColor=white)](https://streamlit.io)
-[![Plotly](https://img.shields.io/badge/Plotly-Interactive%20Viz-3F4F75.svg?style=for-the-badge&logo=plotly&logoColor=white)](https://plotly.com/)
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Adhya2508%2FswitchVA-181717.svg?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Adhya2508/switchVA)
+
+> ### 🌐 **Live Interactive Web Application**: [https://switchva.streamlit.app/](https://switchva.streamlit.app/)
+> **Experience SwitchVA live in your browser** — analyze custom code-mixed Hinglish sentences, visualize token-level language switch points, extract aspect-opinion pairs, and explore continuous Valence-Arousal coordinates on Russell's Circumplex Affective Model in real-time!
 
 ---
 
@@ -15,7 +17,7 @@
 3. [2. Technical Accuracy: Methods, Algorithms & Hyperparameters](#2-technical-accuracy-methods-algorithms--hyperparameters)
 4. [3. Results Obtained So Far: Interim Metrics & Analysis](#3-results-obtained-so-far-interim-metrics--analysis)
 5. [4. Presentation, Clarity & Architectural Justifications (Panel Review Q&A)](#4-presentation-clarity--architectural-justifications-panel-review-qa)
-6. [Streamlit Deployment Guide](#-streamlit-community-cloud-deployment-guide)
+6. [🌐 Live Web App & Deployment](#-live-web-app--deployment)
 7. [Repository Structure](#-repository-structure)
 
 ---
@@ -282,17 +284,17 @@ Total Loss
 
 ---
 
-## ☁️ Streamlit Community Cloud Deployment Guide
+## 🌐 Live Web App & Deployment
 
-The web application is ready to deploy directly to Streamlit Community Cloud in 4 simple steps:
+The web application is fully deployed and accessible globally on Streamlit Community Cloud:
 
-1. **GitHub Repository**: [https://github.com/Adhya2508/switchVA](https://github.com/Adhya2508/switchVA)
-2. **Access**: Go to [share.streamlit.io](https://share.streamlit.io) and log in with GitHub (`Adhya2508`).
-3. **App Settings**:
-   * **Repository**: `Adhya2508/switchVA`
-   * **Branch**: `main`
-   * **Main file path**: `app.py`
-4. **Deploy**: Click **"Deploy!"**. The platform will install `requirements.txt` and launch your live application with a public shareable URL.
+🔗 **Live URL**: [https://switchva.streamlit.app/](https://switchva.streamlit.app/)
+
+### Deployment Configuration
+* **Hosting Platform**: Streamlit Community Cloud
+* **GitHub Repository**: [`Adhya2508/switchVA`](https://github.com/Adhya2508/switchVA)
+* **Entry Point**: `app.py`
+* **Python Environment**: Python 3.10+ with PyTorch & Hugging Face Transformers
 
 ---
 
@@ -325,5 +327,6 @@ switchVA/
 ## 👥 Authors & Acknowledgments
 
 * **Lead Developer**: Adhya Sharma ([@Adhya2508](https://github.com/Adhya2508))
+* **Live Deployment**: [switchva.streamlit.app](https://switchva.streamlit.app/)
 * **Pre-trained Backbone**: `l3cube-pune/hing-roberta`
 * **Technologies**: PyTorch, Hugging Face Transformers, Streamlit, Plotly
