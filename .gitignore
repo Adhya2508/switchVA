@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Large Model weights & Checkpoints (Exceeds GitHub 100MB limit)
+pretrained_models/
+*.bin
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+*.h5
+
+# Streamlit run cache
+.streamlit/secrets.toml
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
