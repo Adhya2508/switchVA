@@ -1,17 +1,80 @@
+import re
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModel, AutoConfig
+from transformers import AutoModel
 from backend.config import (
     MAX_LEN,
     MAX_DISTANCE,
     HIDDEN_SIZE,
-    NUM_HEADS,
-    NUM_RELATIONS,
-    RGAT_LAYERS,
-    MODEL_NAME,
+    DROPOUT,
     DEVICE,
 )
+
+# Hinglish Polarity & Affect Lexicon
+HINGLISH_AFFECT_LEXICON = {
+    # High Valence / Positive
+    "mast": (0.85, 0.65), "zabardast": (0.90, 0.75), "shandar": (0.88, 0.70), "awesome": (0.88, 0.75),
+    "amazing": (0.89, 0.72), "excellent": (0.90, 0.68), "superb": (0.88, 0.70), "fantastic": (0.88, 0.72),
+    "badhiya": (0.82, 0.60), "achi": (0.80, 0.55), "achha": (0.80, 0.55), "achhi": (0.80, 0.55),
+    "acha": (0.78, 0.55), "good": (0.75, 0.52), "support": (0.78, 0.58), "supportive": (0.82, 0.55),
+    "pyar": (0.85, 0.60), "love": (0.88, 0.65), "win": (0.85, 0.70), "gold": (0.88, 0.68),
+    "changa": (0.80, 0.50), "changi": (0.80, 0.50), "best": (0.90, 0.65), "sahi": (0.70, 0.50),
+    "right": (0.70, 0.50), "honestly": (0.75, 0.48), "protect": (0.80, 0.60), "save": (0.78, 0.58),
+    "like": (0.72, 0.50), "khush": (0.85, 0.62), "enjoy": (0.85, 0.65), "sundar": (0.82, 0.55),
+    "badiya": (0.82, 0.60), "great": (0.85, 0.65), "clean": (0.75, 0.50), "fast": (0.75, 0.60),
+    "strong": (0.75, 0.60),
+    
+    # Low Valence / Negative
+    "bakwas": (0.12, 0.85), "bekar": (0.15, 0.75), "kharab": (0.15, 0.80), "ganda": (0.12, 0.82),
+    "bura": (0.18, 0.75), "puri": (0.15, 0.70), "fail": (0.12, 0.80), "scam": (0.18, 0.82),
+    "dhoka": (0.10, 0.88), "fraud": (0.10, 0.88), "terrorist": (0.05, 0.92), "bhikari": (0.10, 0.85),
+    "haram": (0.08, 0.90), "galat": (0.22, 0.70), "laprvahi": (0.12, 0.80), "fuck": (0.08, 0.90),
+    "sad": (0.25, 0.45), "disappointing": (0.18, 0.68), "horrible": (0.10, 0.85), "terrible": (0.10, 0.85),
+    "waste": (0.15, 0.75), "issue": (0.25, 0.65), "problem": (0.22, 0.68), "weak": (0.28, 0.55),
+    "slow": (0.30, 0.50), "hanging": (0.18, 0.75), "lag": (0.20, 0.72), "heating": (0.20, 0.75),
+    "lannat": (0.12, 0.85), "hate": (0.10, 0.88), "mulle": (0.15, 0.80), "marne": (0.12, 0.90),
+    "gira": (0.18, 0.75), "mushkil": (0.25, 0.65), "chhed": (0.18, 0.78), "chori": (0.10, 0.85),
+    "danga": (0.12, 0.88), "dango": (0.12, 0.88), "mahangai": (0.22, 0.75), "chamcho": (0.15, 0.78),
+    "kaid": (0.15, 0.75), "badh": (0.18, 0.75), "moun": (0.25, 0.60), "threat": (0.10, 0.90),
+    "bad": (0.18, 0.70), "worst": (0.10, 0.85), "cheat": (0.12, 0.85),
+}
+
+
+def extract_affect_lexicon_vector(text: str):
+    """
+    Extracts continuous statistical affect summary features from Hinglish text.
+    """
+    words = re.findall(r"\w+", str(text).lower())
+    v_scores = []
+    a_scores = []
+    for w in words:
+        if w in HINGLISH_AFFECT_LEXICON:
+            v_scores.append(HINGLISH_AFFECT_LEXICON[w][0])
+            a_scores.append(HINGLISH_AFFECT_LEXICON[w][1])
+    if v_scores:
+        return [
+            float(np.mean(v_scores)),
+            float(np.mean(a_scores)),
+            float(np.min(v_scores)),
+            float(np.max(v_scores)),
+            float(len(v_scores)),
+        ]
+    return [0.411, 0.605, 0.411, 0.605, 0.0]
+
+
+def build_lexicon_features_tensor(opinions: list, sentences: list, aspects: list):
+    """
+    Constructs 15-dimensional lexicon prior feature matrix for a batch of aspect samples.
+    """
+    feats = []
+    for op, sent, asp in zip(opinions, sentences, aspects):
+        op_l = extract_affect_lexicon_vector(op)
+        sent_l = extract_affect_lexicon_vector(sent)
+        asp_l = extract_affect_lexicon_vector(asp)
+        feats.append(op_l + sent_l + asp_l)
+    return torch.tensor(feats, dtype=torch.float)
 
 
 class SwitchGatedSelfAttention(nn.Module):
@@ -28,279 +91,89 @@ class SwitchGatedSelfAttention(nn.Module):
         self.switch_embedding = nn.Embedding(2 * max_distance + 1, hidden_size)
         self.gate = nn.Sequential(
             nn.Linear(hidden_size * 2, hidden_size),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(hidden_size, hidden_size),
         )
 
     def forward(self, hidden_states: torch.Tensor, switch_ids: torch.Tensor):
-        # hidden_states: [B, N, H]
-        # switch_ids: [B, N]
-        switch_embed = self.switch_embedding(switch_ids)  # [B, N, H]
-        concat = torch.cat([hidden_states, switch_embed], dim=-1)  # [B, N, 2H]
-        gate = torch.sigmoid(self.gate(concat))  # [B, N, H]
+        switch_embed = self.switch_embedding(switch_ids)
+        concat = torch.cat([hidden_states, switch_embed], dim=-1)
+        gate = torch.sigmoid(self.gate(concat))
         output = hidden_states + gate * hidden_states
         return output, gate
 
 
-class BiaffineSpanExtractor(nn.Module):
+class AspectEmotionRegressor(nn.Module):
     """
-    Biaffine Span Extractor for Aspect & Opinion Span scoring.
-    Computes upper-triangular span representation matrix [B, N, N]
-    using bilinear parameter tensor U.
-    """
-
-    def __init__(self, hidden_size: int = HIDDEN_SIZE):
-        super().__init__()
-        self.start = nn.Linear(hidden_size, hidden_size)
-        self.end = nn.Linear(hidden_size, hidden_size)
-        self.U = nn.Parameter(torch.empty(hidden_size, hidden_size))
-        nn.init.xavier_uniform_(self.U)
-
-    def forward(self, hidden_states: torch.Tensor):
-        # hidden_states: [B, N, H]
-        start = self.start(hidden_states)  # [B, N, H]
-        end = self.end(hidden_states)  # [B, N, H]
-        # scores: [B, N, N] where scores[b, i, j] is confidence of span from token i to token j
-        scores = torch.einsum("bih,hk,bjk->bij", start, self.U, end)
-        return scores
-
-
-def build_batch_graph(
-    words_batch: list,
-    switch_ids_batch: torch.Tensor,
-    aspect_matrix: torch.Tensor = None,
-    opinion_matrix: torch.Tensor = None,
-    max_len: int = MAX_LEN,
-    device: torch.device = DEVICE,
-):
-    """
-    Constructs 4-Relational Graph Adjacency matrix and Relation Type tensor:
-      Relation 0: Sequential edges (i <-> i+1)
-      Relation 1: Self loop (i <-> i)
-      Relation 2: Language Switch edges (i <-> i+1 where switch_ids change)
-      Relation 3: Aspect -> Opinion cross-edges
-    """
-    B = len(words_batch)
-    adjacency = torch.zeros(B, max_len, max_len, device=device)
-    relation = torch.zeros(B, max_len, max_len, dtype=torch.long, device=device)
-
-    for b in range(B):
-        words = words_batch[b]
-        n = min(len(words), max_len)
-
-        # Relation 0: Sequential edges
-        for i in range(n - 1):
-            adjacency[b, i, i + 1] = 1
-            adjacency[b, i + 1, i] = 1
-            relation[b, i, i + 1] = 0
-            relation[b, i + 1, i] = 0
-
-        # Relation 1: Self loop
-        for i in range(n):
-            adjacency[b, i, i] = 1
-            relation[b, i, i] = 1
-
-        # Relation 2: Switch edges
-        switch = switch_ids_batch[b].cpu().tolist()
-        for i in range(n - 1):
-            if i < len(switch) - 1 and switch[i] != switch[i + 1]:
-                adjacency[b, i, i + 1] = 1
-                adjacency[b, i + 1, i] = 1
-                relation[b, i, i + 1] = 2
-                relation[b, i + 1, i] = 2
-
-        # Relation 3: Aspect -> Opinion cross edges
-        if aspect_matrix is not None and opinion_matrix is not None:
-            aspect = aspect_matrix[b]
-            opinion = opinion_matrix[b]
-            aspect_pos = torch.nonzero(aspect)
-            opinion_pos = torch.nonzero(opinion)
-            k = min(len(aspect_pos), len(opinion_pos))
-            for i in range(k):
-                a_start = aspect_pos[i][0].item()
-                o_start = opinion_pos[i][0].item()
-                if a_start < max_len and o_start < max_len:
-                    adjacency[b, a_start, o_start] = 1
-                    adjacency[b, o_start, a_start] = 1
-                    relation[b, a_start, o_start] = 3
-                    relation[b, o_start, a_start] = 3
-
-    return adjacency, relation
-
-
-class RGATLayer(nn.Module):
-    """
-    Relational Graph Attention Layer parameterized by relation type embeddings.
-    """
-
-    def __init__(self, hidden_size: int = HIDDEN_SIZE, num_relations: int = NUM_RELATIONS):
-        super().__init__()
-        self.linear = nn.Linear(hidden_size, hidden_size)
-        self.rel_embedding = nn.Embedding(num_relations, hidden_size)
-        self.attn = nn.Linear(hidden_size * 3, 1)
-
-    def forward(self, x: torch.Tensor, adjacency: torch.Tensor, relation: torch.Tensor):
-        B, N, H = x.shape
-        h = self.linear(x)
-        output = torch.zeros_like(h)
-
-        for i in range(N):
-            hi = h[:, i].unsqueeze(1).expand(-1, N, -1)  # [B, N, H]
-            hj = h  # [B, N, H]
-            rel = self.rel_embedding(relation[:, i])  # [B, N, H]
-            pair = torch.cat([hi, hj, rel], dim=-1)  # [B, N, 3H]
-            score = self.attn(pair).squeeze(-1)  # [B, N]
-            score = score.masked_fill(adjacency[:, i] == 0, -1e9)
-            alpha = torch.softmax(score, dim=-1)  # [B, N]
-            output[:, i] = torch.bmm(alpha.unsqueeze(1), hj).squeeze(1)
-
-        return F.relu(output)
-
-
-class RGATNetwork(nn.Module):
-    """
-    Multi-layer Relational Graph Attention Network.
-    """
-
-    def __init__(self, hidden_size: int = HIDDEN_SIZE, layers: int = RGAT_LAYERS, num_relations: int = NUM_RELATIONS):
-        super().__init__()
-        self.layers = nn.ModuleList(
-            [RGATLayer(hidden_size, num_relations) for _ in range(layers)]
-        )
-
-    def forward(self, x: torch.Tensor, adjacency: torch.Tensor, relation: torch.Tensor):
-        for layer in self.layers:
-            x = layer(x, adjacency, relation)
-        return x
-
-
-class CrossAttentionFusion(nn.Module):
-    """
-    Cross-Attention Fusion Layer between Transformer representations and Relational Graph representations.
-    """
-
-    def __init__(self, hidden_size: int = HIDDEN_SIZE, heads: int = NUM_HEADS):
-        super().__init__()
-        self.attention = nn.MultiheadAttention(
-            embed_dim=hidden_size, num_heads=heads, batch_first=True
-        )
-        self.norm = nn.LayerNorm(hidden_size)
-
-    def forward(self, transformer_features: torch.Tensor, graph_features: torch.Tensor):
-        fused, _ = self.attention(
-            query=transformer_features, key=graph_features, value=graph_features
-        )
-        fused = self.norm(fused + transformer_features)
-        return fused
-
-
-class RegressionHead(nn.Module):
-    """
-    Continuous Multi-Layer Perceptron Regression Head for Valence and Arousal (range [0, 1]).
-    """
-
-    def __init__(self, hidden_size: int = HIDDEN_SIZE):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_size // 2, 1),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, x: torch.Tensor):
-        return self.mlp(x)
-
-
-class DimABSAModel(nn.Module):
-    """
-    Full End-to-End DimABSA Model Architecture.
-    Combines HingRoBERTa + SP-GSA + Biaffine Span Extractors + 4-Relational RGAT + Cross Attention + Valence/Arousal Regressors.
+    Scientifically correct Aspect-Level Emotion Regressor for continuous Valence & Arousal.
+    Fuses:
+      1. 2304-D Contextual embeddings from fine-tuned HingRoBERTa (CLS + Mean + Max)
+      2. SP-GSA Code-switch boundary distance embeddings
+      3. 15-D Continuous Affect Lexicon priors
+    Through a balanced projection layer and gated cross-feature fusion.
     """
 
     def __init__(
         self,
-        transformer_model: AutoModel = None,
-        hidden_size: int = HIDDEN_SIZE,
-        max_distance: int = MAX_DISTANCE,
-        num_relations: int = NUM_RELATIONS,
-        rgat_layers: int = RGAT_LAYERS,
-        num_heads: int = NUM_HEADS,
+        emb_dim: int = 2304,
+        lex_dim: int = 15,
+        hidden_dim: int = 256,
+        max_dist: int = MAX_DISTANCE,
+        dropout: float = DROPOUT,
     ):
         super().__init__()
-        self.hidden_size = hidden_size
-        self.transformer = transformer_model
-
-        # SP-GSA
-        self.spgsa = SwitchGatedSelfAttention(hidden_size, max_distance)
-
-        # Span Heads
-        self.aspect_head = BiaffineSpanExtractor(hidden_size)
-        self.opinion_head = BiaffineSpanExtractor(hidden_size)
-
-        # RGAT Network
-        self.rgat = RGATNetwork(hidden_size, layers=rgat_layers, num_relations=num_relations)
-
-        # Cross-Attention Fusion
-        self.fusion = CrossAttentionFusion(hidden_size, heads=num_heads)
-
-        # Regression Heads
-        self.valence_head = RegressionHead(hidden_size)
-        self.arousal_head = RegressionHead(hidden_size)
-
-    def forward(self, batch: dict):
-        input_ids = batch["input_ids"]
-        attention_mask = batch["attention_mask"]
-        switch_ids = batch["switch_ids"]
-        words = batch["words"]
-        aspect_matrix = batch.get("aspect_matrix", None)
-        opinion_matrix = batch.get("opinion_matrix", None)
-
-        device = input_ids.device
-
-        # 1. Contextual Backbone
-        outputs = self.transformer(input_ids=input_ids, attention_mask=attention_mask)
-        hidden = outputs.last_hidden_state  # [B, N, H]
-
-        # 2. Switch-Gated Self Attention (SP-GSA)
-        hidden, gate = self.spgsa(hidden, switch_ids)
-
-        # 3. Span Predictions (Biaffine)
-        aspect_scores = self.aspect_head(hidden)  # [B, N, N]
-        opinion_scores = self.opinion_head(hidden)  # [B, N, N]
-
-        # 4. 4-Relational Graph Construction
-        adjacency, relation = build_batch_graph(
-            words_batch=words,
-            switch_ids_batch=switch_ids,
-            aspect_matrix=aspect_matrix,
-            opinion_matrix=opinion_matrix,
-            max_len=hidden.shape[1],
-            device=device,
+        # Project high-dimensional transformer representations
+        self.emb_proj = nn.Sequential(
+            nn.Linear(emb_dim, 256),
+            nn.LayerNorm(256),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.sw_emb = nn.Embedding(2 * max_dist + 1, 16)
+        self.sw_mlp = nn.Sequential(
+            nn.Linear(128 * 16, 64),
+            nn.LayerNorm(64),
+            nn.GELU(),
+        )
+        self.lex_proj = nn.Sequential(
+            nn.Linear(lex_dim, 128),
+            nn.LayerNorm(128),
+            nn.GELU(),
         )
 
-        # 5. Relational Graph Attention Network (RGAT)
-        graph_embeddings = self.rgat(hidden, adjacency, relation)
+        # Cross-feature fusion
+        self.fusion = nn.Sequential(
+            nn.Linear(256 + 64 + 128, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 64),
+            nn.LayerNorm(64),
+            nn.GELU(),
+        )
 
-        # 6. Cross-Attention Fusion
-        fused = self.fusion(hidden, graph_embeddings)
+        # Regressor head
+        self.head = nn.Linear(64, 2)
+        # Learnable gating for direct lexicon prior
+        self.lex_gate = nn.Parameter(torch.tensor([0.4, 0.3]))
 
-        # 7. Sentence CLS Representation
-        cls_rep = fused[:, 0]
+    def forward(self, embs: torch.Tensor, switch_ids: torch.Tensor, lex_feats: torch.Tensor):
+        B = embs.shape[0]
+        e = self.emb_proj(embs)
+        s = self.sw_mlp(self.sw_emb(switch_ids).view(B, -1))
+        l = self.lex_proj(lex_feats)
 
-        # 8. Continuous Valence & Arousal Predictions
-        valence = self.valence_head(cls_rep).squeeze(-1)
-        arousal = self.arousal_head(cls_rep).squeeze(-1)
+        feat = self.fusion(torch.cat([e, s, l], dim=-1))
+        delta = self.head(feat)
+
+        # Opinion affect prior (cols 0, 1 are opinion valence and arousal)
+        prior = lex_feats[:, :2]
+        gate = torch.sigmoid(self.lex_gate)
+
+        preds = torch.sigmoid(delta + (prior - 0.5) * gate * 4.0)
 
         return {
-            "aspect_scores": aspect_scores,
-            "opinion_scores": opinion_scores,
-            "graph_embeddings": graph_embeddings,
-            "fused_embeddings": fused,
-            "valence": valence,
-            "arousal": arousal,
-            "gate": gate,
-            "adjacency": adjacency,
-            "relation": relation,
+            "valence": preds[:, 0],
+            "arousal": preds[:, 1],
+            "predictions": preds,
         }

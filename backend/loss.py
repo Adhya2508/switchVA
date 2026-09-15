@@ -1,6 +1,23 @@
 import torch
 import torch.nn as nn
-from backend.config import POS_WEIGHT, DEVICE
+import numpy as np
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from backend.config import POS_WEIGHT, LOSS_MSE_WEIGHT, LOSS_HUBER_WEIGHT, LOSS_CCC_WEIGHT
+
+
+def lin_ccc(y_true: np.ndarray, y_pred: np.ndarray):
+    """
+    Lin's Concordance Correlation Coefficient (numpy).
+    """
+    if len(y_true) < 2:
+        return 1.0
+    mean_true = np.mean(y_true)
+    mean_pred = np.mean(y_pred)
+    var_true = np.var(y_true)
+    var_pred = np.var(y_pred)
+    cov = np.mean((y_true - mean_true) * (y_pred - mean_pred))
+    ccc = (2 * cov) / (var_true + var_pred + (mean_true - mean_pred) ** 2 + 1e-8)
+    return float(ccc)
 
 
 def ccc_loss(pred: torch.Tensor, target: torch.Tensor):
@@ -25,78 +42,130 @@ def ccc_loss(pred: torch.Tensor, target: torch.Tensor):
     return 1.0 - ccc
 
 
-def compute_span_loss(outputs: dict, batch: dict, pos_weight: float = POS_WEIGHT):
+def compute_aspect_regression_loss(
+    pred_val: torch.Tensor,
+    pred_aro: torch.Tensor,
+    target_val: torch.Tensor,
+    target_aro: torch.Tensor,
+    mse_w: float = LOSS_MSE_WEIGHT,
+    huber_w: float = LOSS_HUBER_WEIGHT,
+    ccc_w: float = LOSS_CCC_WEIGHT,
+):
+    """
+    Calculates multi-objective loss for aspect-level Valence and Arousal.
+    Combines MSE, Huber (Smooth L1), and Lin's CCC loss to directly minimize RMSE.
+    """
+    mse_loss_fn = nn.MSELoss()
+    huber_loss_fn = nn.SmoothL1Loss(beta=0.05)
+
+    val_mse = mse_loss_fn(pred_val, target_val)
+    aro_mse = mse_loss_fn(pred_aro, target_aro)
+
+    val_huber = huber_loss_fn(pred_val, target_val)
+    aro_huber = huber_loss_fn(pred_aro, target_aro)
+
+    val_ccc = ccc_loss(pred_val, target_val)
+    aro_ccc = ccc_loss(pred_aro, target_aro)
+
+    total_loss = (
+        mse_w * (val_mse + aro_mse)
+        + huber_w * (val_huber + aro_huber)
+        + ccc_w * (val_ccc + aro_ccc)
+    )
+
+    return {
+        "loss": total_loss,
+        "val_mse": val_mse,
+        "aro_mse": aro_mse,
+        "val_huber": val_huber,
+        "aro_huber": aro_huber,
+        "val_ccc": val_ccc,
+        "aro_ccc": aro_ccc,
+    }
+
+
+def compute_span_loss(
+    aspect_scores: torch.Tensor,
+    opinion_scores: torch.Tensor,
+    aspect_target: torch.Tensor,
+    opinion_target: torch.Tensor,
+    pos_weight: float = POS_WEIGHT,
+):
     """
     Computes weighted BCE loss for sparse aspect and opinion span detection matrices.
     """
-    device = outputs["aspect_scores"].device
+    device = aspect_scores.device
     pos_weight_tensor = torch.tensor([pos_weight], device=device)
     bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
 
-    aspect_target = batch["aspect_matrix"].to(device)
-    opinion_target = batch["opinion_matrix"].to(device)
-
-    aspect_loss = bce(outputs["aspect_scores"], aspect_target)
-    opinion_loss = bce(outputs["opinion_scores"], opinion_target)
+    aspect_loss = bce(aspect_scores, aspect_target)
+    opinion_loss = bce(opinion_scores, opinion_target)
 
     return aspect_loss + opinion_loss
 
 
-def compute_regression_loss(outputs: dict, batch: dict):
+def calculate_comprehensive_metrics(
+    true_vals: list,
+    pred_vals: list,
+    true_aros: list,
+    pred_aros: list,
+):
     """
-    Computes Smooth L1 (Huber) regression loss for Valence and Arousal scores.
+    Computes complete statistical evaluation metrics:
+    RMSE, MAE, R², CCC, and Pearson Correlation.
     """
-    device = outputs["valence"].device
-    smooth_l1 = nn.SmoothL1Loss()
+    y_true_v = np.array(true_vals, dtype=np.float64)
+    y_pred_v = np.array(pred_vals, dtype=np.float64)
+    y_true_a = np.array(true_aros, dtype=np.float64)
+    y_pred_a = np.array(pred_aros, dtype=np.float64)
 
-    pred_val = outputs["valence"]
-    pred_aro = outputs["arousal"]
+    if len(y_true_v) == 0:
+        return {
+            "valence_rmse": 0.0,
+            "arousal_rmse": 0.0,
+            "overall_rmse": 0.0,
+            "valence_mae": 0.0,
+            "arousal_mae": 0.0,
+            "valence_r2": 0.0,
+            "arousal_r2": 0.0,
+            "valence_ccc": 0.0,
+            "arousal_ccc": 0.0,
+            "valence_pearson": 0.0,
+            "arousal_pearson": 0.0,
+        }
 
-    target_val = []
-    target_aro = []
+    val_rmse = float(np.sqrt(mean_squared_error(y_true_v, y_pred_v)))
+    aro_rmse = float(np.sqrt(mean_squared_error(y_true_a, y_pred_a)))
+    overall_rmse = float(np.sqrt(0.5 * (val_rmse**2 + aro_rmse**2)))
 
-    for v, a in zip(batch["valence"], batch["arousal"]):
-        if not torch.is_tensor(v):
-            v = torch.tensor(v, dtype=torch.float)
-        if not torch.is_tensor(a):
-            a = torch.tensor(a, dtype=torch.float)
+    val_mae = float(mean_absolute_error(y_true_v, y_pred_v))
+    aro_mae = float(mean_absolute_error(y_true_a, y_pred_a))
 
-        if v.numel() == 0:
-            target_val.append(0.5)
-        else:
-            target_val.append(float(v.mean()))
+    val_r2 = float(r2_score(y_true_v, y_pred_v))
+    aro_r2 = float(r2_score(y_true_a, y_pred_a))
 
-        if a.numel() == 0:
-            target_aro.append(0.5)
-        else:
-            target_aro.append(float(a.mean()))
+    val_ccc = lin_ccc(y_true_v, y_pred_v)
+    aro_ccc = lin_ccc(y_true_a, y_pred_a)
 
-    target_val = torch.tensor(target_val, dtype=torch.float, device=device)
-    target_aro = torch.tensor(target_aro, dtype=torch.float, device=device)
+    # Pearson r
+    def pearson_r(a, b):
+        if np.std(a) == 0 or np.std(b) == 0:
+            return 0.0
+        return float(np.corrcoef(a, b)[0, 1])
 
-    val_loss = smooth_l1(pred_val, target_val)
-    aro_loss = smooth_l1(pred_aro, target_aro)
-
-    return val_loss + aro_loss, target_val, target_aro
-
-
-def compute_total_loss(outputs: dict, batch: dict, pos_weight: float = POS_WEIGHT):
-    """
-    Calculates unified multi-task DimABSA objective:
-      Loss = Span_Loss + 0.5 * Regression_Loss + 0.5 * CCC_Valence + 0.5 * CCC_Arousal
-    """
-    span_loss = compute_span_loss(outputs, batch, pos_weight=pos_weight)
-    reg_loss, target_val, target_aro = compute_regression_loss(outputs, batch)
-
-    val_ccc = ccc_loss(outputs["valence"], target_val)
-    aro_ccc = ccc_loss(outputs["arousal"], target_aro)
-
-    total_loss = span_loss + 0.5 * reg_loss + 0.5 * val_ccc + 0.5 * aro_ccc
+    val_pearson = pearson_r(y_true_v, y_pred_v)
+    aro_pearson = pearson_r(y_true_a, y_pred_a)
 
     return {
-        "loss": total_loss,
-        "span_loss": span_loss,
-        "regression_loss": reg_loss,
-        "val_ccc": val_ccc,
-        "aro_ccc": aro_ccc,
+        "valence_rmse": round(val_rmse, 4),
+        "arousal_rmse": round(aro_rmse, 4),
+        "overall_rmse": round(overall_rmse, 4),
+        "valence_mae": round(val_mae, 4),
+        "arousal_mae": round(aro_mae, 4),
+        "valence_r2": round(val_r2, 4),
+        "arousal_r2": round(aro_r2, 4),
+        "valence_ccc": round(val_ccc, 4),
+        "arousal_ccc": round(aro_ccc, 4),
+        "valence_pearson": round(val_pearson, 4),
+        "arousal_pearson": round(aro_pearson, 4),
     }

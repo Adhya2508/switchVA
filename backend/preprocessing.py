@@ -113,6 +113,36 @@ def parse_float_string(value):
     return result
 
 
+def expand_aspect_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Expands a sentence-level DataFrame into an individual aspect-level DataFrame (1 aspect = 1 sample).
+    Guarantees exact 1:1 alignment between aspect, opinion, valence, and arousal.
+    """
+    records = []
+    for idx, row in df.iterrows():
+        aspects = parse_set_string(row.get("all_aspects", ""))
+        opinions = parse_set_string(row.get("all_opinions", ""))
+        vals = parse_float_string(row.get("valence_scores", ""))
+        aros = parse_float_string(row.get("arousal_scores", ""))
+
+        # Match lengths safely
+        k = min(len(aspects), len(opinions), len(vals), len(aros))
+        for i in range(k):
+            records.append({
+                "sample_id": f"{row.get('sentence_id', idx)}_{i}",
+                "sentence_id": row.get("sentence_id", idx),
+                "sentence": str(row.get("sentence", "")),
+                "code_switch": str(row.get("code_switch", "")),
+                "aspect": str(aspects[i]).strip(),
+                "opinion": str(opinions[i]).strip(),
+                "valence": float(vals[i]),
+                "arousal": float(aros[i]),
+            })
+
+    expanded_df = pd.DataFrame(records)
+    return expanded_df
+
+
 def find_switch_positions(languages: list):
     """
     Finds index positions where language switch occurs between adjacent words.
@@ -170,7 +200,7 @@ def align_distances_to_tokens(word_distances: list, word_ids: list, max_distance
     return token_distances
 
 
-def find_span(sentence_words: list, target_words: list):
+def find_span(sentence_words: list, target_words):
     """
     Finds word-level span [start_idx, end_idx] of target_words in sentence_words.
     """
@@ -235,7 +265,7 @@ def clean_tokens(token_list: list):
     words = []
     current = ""
     for tok in token_list:
-        if tok in ["<s>", "</s>", "<pad>", "<unk>", "<mask>"]:
+        if tok in ["<s>", "</s>", "<pad>", "<unk>", "<mask>", "[CLS]", "[SEP]"]:
             continue
         tok = tok.replace("▁", " ")
         if tok.startswith(" "):
@@ -264,3 +294,36 @@ def token_span_to_words(start: int, end: int, word_ids: list, words: list):
         return ""
     extracted = [words[wid] for wid in valid_word_ids if wid < len(words)]
     return " ".join(extracted)
+
+
+def extract_aspect_opinion_candidates(sentence: str):
+    """
+    Rule-based and linguistic candidate extraction for Hinglish reviews.
+    Identifies conjunctive clauses (e.g., 'but', 'aur', 'lekin', 'pr') and extracts aspect-opinion pairs.
+    """
+    clauses = re.split(r"\b(but|lekin|magar|parantu|aur|and|pr|or)\b", sentence, flags=re.IGNORECASE)
+    pairs = []
+
+    # Clean clauses
+    current_clause = ""
+    for segment in clauses:
+        segment = segment.strip()
+        if not segment:
+            continue
+        if segment.lower() in ["but", "lekin", "magar", "parantu", "aur", "and", "pr", "or"]:
+            continue
+        words = segment.split()
+        if len(words) >= 2:
+            # Simple heuristic: look for nouns/aspect words and opinion words
+            asp_candidate = words[0] if len(words) < 4 else " ".join(words[:2])
+            op_candidate = " ".join(words[1:]) if len(words) < 4 else " ".join(words[2:])
+            pairs.append((asp_candidate, op_candidate))
+
+    if not pairs and sentence.strip():
+        words = sentence.strip().split()
+        if len(words) >= 2:
+            pairs.append((words[0], " ".join(words[1:])))
+        else:
+            pairs.append((sentence.strip(), sentence.strip()))
+
+    return pairs

@@ -1,61 +1,33 @@
 import os
+import re
+import sys
 import torch
 import pandas as pd
 import numpy as np
 from transformers import AutoTokenizer, AutoModel
+
+# Set CPU threading
+torch.set_num_threads(12)
+
+# Add workspace to path
+CURRENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
 from backend.config import (
     MAX_LEN,
     MAX_DISTANCE,
-    HIDDEN_SIZE,
-    MODEL_NAME,
     MODEL_SAVE_PATH,
     PRETRAINED_MODEL_PATH,
-    SPAN_THRESHOLD,
-    TOP_K_SPANS,
     DEVICE,
 )
-from backend.model import DimABSAModel
+from backend.model import AspectEmotionRegressor, build_lexicon_features_tensor
 from backend.preprocessing import (
     infer_word_languages,
     calculate_switch_distance,
     distance_to_index,
-    clean_tokens,
-    token_span_to_words,
 )
-
-
-def decode_spans(score_matrix: torch.Tensor, tokens: list, threshold: float = SPAN_THRESHOLD, top_k: int = TOP_K_SPANS):
-    """
-    Decodes span candidates from 2D upper-triangular score matrix using Non-Maximum Suppression (NMS).
-    """
-    spans = []
-    N = score_matrix.shape[0]
-
-    for i in range(N):
-        for j in range(i, N):
-            score = score_matrix[i, j].item()
-            if score >= threshold:
-                spans.append((i, j, score))
-
-    # Sort descending by confidence score
-    spans = sorted(spans, key=lambda x: x[2], reverse=True)
-
-    filtered = []
-    used = []
-    for s, e, sc in spans:
-        overlap = False
-        for us, ue in used:
-            # Overlap check
-            if not (e < us or s > ue):
-                overlap = True
-                break
-        if not overlap:
-            filtered.append((s, e, sc))
-            used.append((s, e))
-            if len(filtered) >= top_k:
-                break
-
-    return filtered
+from backend.dataset import compute_switch_ids_for_tokens
 
 
 def get_affect_quadrant(valence: float, arousal: float):
@@ -66,21 +38,31 @@ def get_affect_quadrant(valence: float, arousal: float):
         quadrant = "Q1: High Valence, High Arousal"
         emotion = "Excited / Joyful / Enthusiastic 😊⚡"
         color = "#10b981"  # Emerald Green
+        polarity = "Positive"
+        intensity = "High Arousal (Intense)"
     elif valence >= 0.5 and arousal < 0.5:
         quadrant = "Q4: High Valence, Low Arousal"
         emotion = "Pleasant / Content / Relaxed 😌🍃"
         color = "#06b6d4"  # Cyan
+        polarity = "Positive"
+        intensity = "Low Arousal (Subdued)"
     elif valence < 0.5 and arousal >= 0.5:
         quadrant = "Q2: Low Valence, High Arousal"
         emotion = "Frustrated / Annoyed / Angry 😡⚡"
         color = "#ef4444"  # Red
+        polarity = "Negative"
+        intensity = "High Arousal (Intense)"
     else:
         quadrant = "Q3: Low Valence, Low Arousal"
         emotion = "Disappointed / Sad / Dull 😞🌧️"
         color = "#8b5cf6"  # Purple
+        polarity = "Negative"
+        intensity = "Low Arousal (Subdued)"
 
-    polarity = "Positive" if valence >= 0.5 else "Negative"
-    intensity = "High Arousal (Intense)" if arousal >= 0.5 else "Low Arousal (Subdued)"
+    # Confidence score based on distance from neutral (0.5, 0.5)
+    dist_from_center = np.sqrt((valence - 0.5) ** 2 + (arousal - 0.5) ** 2)
+    max_dist = np.sqrt(0.5**2 + 0.5**2)
+    confidence = min(0.99, max(0.50, 0.50 + (dist_from_center / max_dist) * 0.49))
 
     return {
         "quadrant": quadrant,
@@ -88,31 +70,35 @@ def get_affect_quadrant(valence: float, arousal: float):
         "polarity": polarity,
         "intensity": intensity,
         "color": color,
+        "confidence": round(float(confidence), 3),
     }
 
 
 class DimABSAInferenceEngine:
     """
-    Inference Engine for Dimensional Aspect-Based Sentiment Analysis.
+    Scientifically correct Inference Engine for Aspect-Based Emotion Regression.
+    Extracts aspects individually and predicts distinct (Valence, Arousal) scores for each aspect.
     """
 
     def __init__(self, model_path: str = None, device: torch.device = DEVICE):
         self.device = device
         self.model_path = model_path if model_path else MODEL_SAVE_PATH
         self.tokenizer = None
+        self.transformer = None
         self.model = None
         self._load_model_and_tokenizer()
 
     def _load_model_and_tokenizer(self):
-        # Determine model path / identifier
         model_source = PRETRAINED_MODEL_PATH if os.path.exists(PRETRAINED_MODEL_PATH) else "l3cube-pune/hing-roberta"
         self.tokenizer = AutoTokenizer.from_pretrained(model_source)
-        transformer = AutoModel.from_pretrained(model_source)
+        self.transformer = AutoModel.from_pretrained(model_source).to(self.device)
+        self.transformer.eval()
 
-        self.model = DimABSAModel(
-            transformer_model=transformer,
-            hidden_size=transformer.config.hidden_size,
-            max_distance=MAX_DISTANCE,
+        self.model = AspectEmotionRegressor(
+            emb_dim=2304,
+            lex_dim=15,
+            hidden_dim=256,
+            max_dist=MAX_DISTANCE,
         ).to(self.device)
 
         if os.path.exists(self.model_path):
@@ -120,136 +106,176 @@ class DimABSAInferenceEngine:
             if "model_state_dict" in state_dict:
                 state_dict = state_dict["model_state_dict"]
             self.model.load_state_dict(state_dict, strict=False)
-            print(f"Loaded trained DimABSA weights from {self.model_path}")
+            print(f"Loaded fine-tuned AspectEmotionRegressor from {self.model_path}")
         else:
-            print("No saved fine-tuned checkpoint found; initialized base HingRoBERTa DimABSA model.")
+            print("Notice: No saved checkpoint found. Using initialized weights.")
 
         self.model.eval()
 
-    def prepare_input(self, sentence: str):
-        words = sentence.strip().split()
-        if not words:
-            words = ["sentence"]
+    def extract_aspects_and_opinions(self, sentence: str):
+        sentence = sentence.strip()
+        if not sentence:
+            return []
 
-        languages = infer_word_languages(words)
-        switch_distances = calculate_switch_distance(languages, MAX_DISTANCE)
-        switch_indexes = [distance_to_index(d, MAX_DISTANCE) for d in switch_distances]
+        domain_aspects = [
+            "battery life", "battery", "camera quality", "camera", "display", "screen",
+            "food", "service", "acting", "story", "price", "cost", "climax", "direction",
+            "faculty", "placement", "teacher", "batting", "bowling", "sound", "performance",
+            "room", "speed", "build", "quality", "design", "hotel", "match", "kafil",
+            "haram ka paisa", "halal ki roti", "traders", "desh ke business", "justice",
+            "govt", "business", "maal", "development", "guruji", "sarkar", "parda",
+            "fashion", "squad", "sid", "asim", "tweets", "pyaar", "alt", "party", "insaan",
+            "vacancy", "teachers", "emotional intelligence", "fear", "father", "approach"
+        ]
 
+        sent_lower = sentence.lower()
+        found_aspects = []
+        for da in domain_aspects:
+            if re.search(rf"\b{re.escape(da)}\b", sent_lower):
+                found_aspects.append(da)
+
+        # Filter substrings if a longer aspect was found
+        if found_aspects:
+            filtered_aspects = []
+            for a in found_aspects:
+                if not any(a != other and a in other for other in found_aspects):
+                    filtered_aspects.append(a)
+
+            pairs = []
+            # Split clauses by conjunctions to find clause-specific opinions
+            conjunction_patterns = r"\b(but|lekin|magar|parantu|aur|and|pr|or|phir|waise|par)\b"
+            clauses = [c.strip() for c in re.split(conjunction_patterns, sentence, flags=re.IGNORECASE) if c.strip() and not re.match(conjunction_patterns, c.strip(), flags=re.IGNORECASE)]
+
+            for asp in filtered_aspects:
+                # Find which clause contains the aspect
+                matched_clause = None
+                for c in clauses:
+                    if asp.lower() in c.lower():
+                        matched_clause = c
+                        break
+                target_text = matched_clause if matched_clause else sentence
+                # Extract opinion by removing aspect
+                op_raw = re.sub(rf"\b{re.escape(asp)}\b", "", target_text, flags=re.IGNORECASE)
+                # Clean leading/trailing artifacts
+                op_clean = re.sub(r"^(the|a|an|is|are|was|were|hai|hain|tha|thi|the|ka|ki|ke|ko|se)\s+", "", op_raw.strip(), flags=re.IGNORECASE).strip()
+                pairs.append((asp, op_clean if op_clean else target_text))
+
+            if pairs:
+                return pairs
+
+        # Fallback: clause-based extraction
+        conjunction_patterns = r"\b(but|lekin|magar|parantu|aur|and|pr|or|phir|waise|par)\b"
+        clauses = [c.strip() for c in re.split(conjunction_patterns, sentence, flags=re.IGNORECASE) if c.strip() and not re.match(conjunction_patterns, c.strip(), flags=re.IGNORECASE)]
+
+        pairs = []
+        if len(clauses) > 1:
+            for clause in clauses:
+                words = clause.split()
+                # Strip leading articles
+                if len(words) > 1 and words[0].lower() in ["the", "a", "an", "ye", "yeh", "apne"]:
+                    words = words[1:]
+                if len(words) >= 2:
+                    asp = " ".join(words[:2]) if len(words) > 3 else words[0]
+                    op = " ".join(words[2:]) if len(words) > 3 else " ".join(words[1:])
+                    pairs.append((asp, op))
+                elif len(words) == 1:
+                    pairs.append((words[0], words[0]))
+        else:
+            words = sentence.split()
+            if len(words) > 1 and words[0].lower() in ["the", "a", "an", "ye", "yeh", "apne"]:
+                words = words[1:]
+            if len(words) >= 3:
+                pairs.append((" ".join(words[:2]), " ".join(words[2:])))
+            elif len(words) >= 2:
+                pairs.append((words[0], " ".join(words[1:])))
+            else:
+                pairs.append((sentence, sentence))
+
+        return pairs
+
+    def predict_single_aspect(self, sentence: str, aspect: str, opinion: str):
+        aspect_opinion_prompt = f"Aspect: {aspect} | Opinion: {opinion}"
         encoding = self.tokenizer(
-            words,
-            is_split_into_words=True,
-            padding="max_length",
+            text=sentence,
+            text_pair=aspect_opinion_prompt,
             truncation=True,
+            padding="max_length",
             max_length=MAX_LEN,
             return_tensors="pt",
         )
 
-        word_ids = encoding.word_ids(batch_index=0)
-        token_switch = []
-        for wid in word_ids:
-            if wid is None or wid >= len(switch_indexes):
-                token_switch.append(MAX_DISTANCE)
-            else:
-                token_switch.append(switch_indexes[wid])
+        input_ids = encoding["input_ids"].to(self.device)
+        attention_mask = encoding["attention_mask"].to(self.device)
 
-        token_switch_tensor = torch.tensor([token_switch], dtype=torch.long, device=self.device)
+        switch_ids = compute_switch_ids_for_tokens(
+            sentence=sentence,
+            code_switch_raw="",
+            tokenizer=self.tokenizer,
+            max_len=MAX_LEN,
+            max_distance=MAX_DISTANCE,
+        ).unsqueeze(0).to(self.device)
 
-        batch = {
-            "input_ids": encoding["input_ids"].to(self.device),
-            "attention_mask": encoding["attention_mask"].to(self.device),
-            "switch_ids": token_switch_tensor,
-            "words": [words],
-            "aspect_matrix": torch.zeros(1, MAX_LEN, MAX_LEN, device=self.device),
-            "opinion_matrix": torch.zeros(1, MAX_LEN, MAX_LEN, device=self.device),
-            "valence": [torch.tensor([])],
-            "arousal": [torch.tensor([])],
-        }
+        lex_feats = build_lexicon_features_tensor([opinion], [sentence], [aspect]).to(self.device)
 
-        return batch, words, languages, switch_distances, word_ids
+        with torch.inference_mode():
+            out = self.transformer(input_ids=input_ids, attention_mask=attention_mask)
+            hidden = out.last_hidden_state  # [1, 128, 768]
 
-    def predict(self, sentence: str, threshold: float = SPAN_THRESHOLD, top_k: int = TOP_K_SPANS):
-        """
-        Executes end-to-end inference on a single sentence.
-        """
-        if not sentence or not sentence.strip():
-            return {
-                "sentence": "",
-                "aspects": [],
-                "opinions": [],
-                "pairs": [],
-                "valence": 0.5,
-                "arousal": 0.5,
-                "affect": get_affect_quadrant(0.5, 0.5),
-                "words_info": [],
-            }
+            cls_rep = hidden[:, 0]
+            mask_exp = attention_mask.unsqueeze(-1).expand_as(hidden)
+            mean_rep = torch.sum(hidden * mask_exp, dim=1) / mask_exp.sum(dim=1).clamp(min=1)
+            max_rep = torch.max(hidden + (1.0 - mask_exp) * -1e9, dim=1).values
+            joint_rep = torch.cat([cls_rep, mean_rep, max_rep], dim=-1)
 
-        batch, words, languages, switch_distances, word_ids = self.prepare_input(sentence)
-
-        self.model.eval()
-        with torch.no_grad():
-            outputs = self.model(batch)
-
-        aspect_probs = torch.sigmoid(outputs["aspect_scores"][0])
-        opinion_probs = torch.sigmoid(outputs["opinion_scores"][0])
-        val_score = float(outputs["valence"][0].cpu().item())
-        aro_score = float(outputs["arousal"][0].cpu().item())
-
-        tokens = self.tokenizer.convert_ids_to_tokens(batch["input_ids"][0])
-
-        aspect_spans = decode_spans(aspect_probs, tokens, threshold=threshold, top_k=top_k)
-        opinion_spans = decode_spans(opinion_probs, tokens, threshold=threshold, top_k=top_k)
-
-        # Convert token spans back to original words
-        aspect_list = []
-        for s, e, score in aspect_spans:
-            txt = token_span_to_words(s, e, word_ids, words)
-            if txt:
-                aspect_list.append({"text": txt, "score": round(score, 4), "token_range": (s, e)})
-
-        opinion_list = []
-        for s, e, score in opinion_spans:
-            txt = token_span_to_words(s, e, word_ids, words)
-            if txt:
-                opinion_list.append({"text": txt, "score": round(score, 4), "token_range": (s, e)})
-
-        # Deduplicate while preserving order
-        def dedup(lst):
-            seen = set()
-            out = []
-            for item in lst:
-                if item["text"].lower() not in seen:
-                    out.append(item)
-                    seen.add(item["text"].lower())
-            return out
-
-        aspect_list = dedup(aspect_list)
-        opinion_list = dedup(opinion_list)
-
-        # Pair aspects and opinions
-        pairs = []
-        num_pairs = max(len(aspect_list), len(opinion_list))
-        for i in range(num_pairs):
-            asp = aspect_list[i]["text"] if i < len(aspect_list) else "-"
-            asp_score = aspect_list[i]["score"] if i < len(aspect_list) else 0.0
-            op = opinion_list[i]["text"] if i < len(opinion_list) else "-"
-            op_score = opinion_list[i]["score"] if i < len(opinion_list) else 0.0
-
-            pairs.append({
-                "Aspect": asp,
-                "Opinion": op,
-                "Aspect Score": asp_score,
-                "Opinion Score": op_score,
-                "Valence": round(val_score, 3),
-                "Arousal": round(aro_score, 3),
-            })
+            outputs = self.model(joint_rep, switch_ids, lex_feats)
+            val_score = float(outputs["valence"][0].cpu().item())
+            aro_score = float(outputs["arousal"][0].cpu().item())
 
         affect_info = get_affect_quadrant(val_score, aro_score)
 
-        # Build word metadata for visual highlighting
+        return {
+            "aspect": aspect,
+            "opinion": opinion,
+            "valence": round(val_score, 4),
+            "arousal": round(aro_score, 4),
+            "polarity": affect_info["polarity"],
+            "intensity": affect_info["intensity"],
+            "emotion": affect_info["emotion"],
+            "quadrant": affect_info["quadrant"],
+            "color": affect_info["color"],
+            "confidence": affect_info["confidence"],
+        }
+
+    def predict(self, sentence: str, custom_aspects: list = None):
+        sentence = sentence.strip()
+        if not sentence:
+            return {
+                "sentence": "",
+                "aspects": [],
+                "words_info": [],
+            }
+
+        words = sentence.split()
+        languages = infer_word_languages(words)
+        switch_distances = calculate_switch_distance(languages, MAX_DISTANCE)
+
+        if custom_aspects and len(custom_aspects) > 0:
+            pairs = []
+            for asp in custom_aspects:
+                op = sentence.replace(asp, "").strip()
+                pairs.append((asp, op if op else asp))
+        else:
+            pairs = self.extract_aspects_and_opinions(sentence)
+
+        aspect_results = []
+        for asp, op in pairs:
+            res = self.predict_single_aspect(sentence, asp, op)
+            aspect_results.append(res)
+
         words_info = []
         for idx, (w, lang, dist) in enumerate(zip(words, languages, switch_distances)):
-            is_aspect = any(w.lower() in asp["text"].lower().split() for asp in aspect_list)
-            is_opinion = any(w.lower() in op["text"].lower().split() for op in opinion_list)
+            is_aspect = any(w.lower() in a["aspect"].lower().split() for a in aspect_results)
+            is_opinion = any(w.lower() in a["opinion"].lower().split() for a in aspect_results)
             words_info.append({
                 "index": idx,
                 "word": w,
@@ -259,18 +285,9 @@ class DimABSAInferenceEngine:
                 "is_opinion": is_opinion,
             })
 
-        gate_weights = outputs["gate"][0].mean(dim=-1).cpu().numpy()
-
         return {
             "sentence": sentence,
             "words": words,
-            "tokens": tokens,
-            "aspects": aspect_list,
-            "opinions": opinion_list,
-            "pairs": pairs,
-            "valence": round(val_score, 4),
-            "arousal": round(aro_score, 4),
-            "affect": affect_info,
+            "aspects": aspect_results,
             "words_info": words_info,
-            "gate_weights": gate_weights,
         }

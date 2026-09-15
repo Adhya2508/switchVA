@@ -26,3 +26,6 @@ pretrained_models/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Exclude results.md from repository
+results.md

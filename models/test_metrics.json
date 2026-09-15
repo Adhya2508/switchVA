@@ -1,0 +1,44 @@
+{
+  "train": {
+    "valence_rmse": 0.1885,
+    "arousal_rmse": 0.1295,
+    "overall_rmse": 0.1617,
+    "valence_mae": 0.1451,
+    "arousal_mae": 0.1027,
+    "valence_r2": 0.4044,
+    "arousal_r2": 0.1316,
+    "valence_ccc": 0.6334,
+    "arousal_ccc": 0.5273,
+    "valence_pearson": 0.6517,
+    "arousal_pearson": 0.5502,
+    "loss": 0.5732
+  },
+  "val": {
+    "valence_rmse": 0.2117,
+    "arousal_rmse": 0.144,
+    "overall_rmse": 0.1811,
+    "valence_mae": 0.178,
+    "arousal_mae": 0.1176,
+    "valence_r2": 0.1553,
+    "arousal_r2": -0.2334,
+    "valence_ccc": 0.4265,
+    "arousal_ccc": 0.238,
+    "valence_pearson": 0.4587,
+    "arousal_pearson": 0.254,
+    "loss": 0.8577
+  },
+  "test": {
+    "valence_rmse": 0.2101,
+    "arousal_rmse": 0.1374,
+    "overall_rmse": 0.1775,
+    "valence_mae": 0.1699,
+    "arousal_mae": 0.1079,
+    "valence_r2": 0.2121,
+    "arousal_r2": -0.227,
+    "valence_ccc": 0.4843,
+    "arousal_ccc": 0.33,
+    "valence_pearson": 0.511,
+    "arousal_pearson": 0.3461,
+    "loss": 0.7716
+  }
+}
