@@ -26,5 +26,5 @@ pretrained_models/
 .vscode/
 .idea/
 .DS_Store
-Thumbs.db
-
+# Temporary scratch
+scratch/

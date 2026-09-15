@@ -21,13 +21,17 @@ from backend.config import (
     PRETRAINED_MODEL_PATH,
     DEVICE,
 )
-from backend.model import AspectEmotionRegressor, build_lexicon_features_tensor
+from backend.model import (
+    NSSGDimNet,
+    HINGLISH_AFFECT_LEXICON,
+    extract_token_lexicon_features,
+    construct_heterogeneous_adj,
+)
 from backend.preprocessing import (
     infer_word_languages,
     calculate_switch_distance,
     distance_to_index,
 )
-from backend.dataset import compute_switch_ids_for_tokens
 
 
 def get_affect_quadrant(valence: float, arousal: float):
@@ -74,10 +78,63 @@ def get_affect_quadrant(valence: float, arousal: float):
     }
 
 
+def split_hinglish_clauses(sentence: str):
+    """
+    Splits Hinglish sentences into constituent semantic clauses based on:
+    1. Punctuation (, . ; ! -)
+    2. Explicit conjunctions (but, lekin, magar, par, parantu, aur, and, etc.)
+    3. Tense/auxiliary verb boundaries (tha, thi, the, hai, hain, etc.) when followed by words
+    """
+    s = sentence.strip()
+    raw_segments = re.split(r'[,;!?\.\n]+', s)
+    
+    clauses = []
+    conjunction_pattern = r'\b(but|lekin|magar|parantu|par|kintu|aur|and|or|phir|waise|halanki|while|whereas)\b'
+    aux_boundary_pattern = r'(\b(?:tha|thi|the|hai|hain|hoga|hogi|gaya|gayi|raha|rahi)\b)(?=\s+[a-zA-Z0-9])'
+    
+    for seg in raw_segments:
+        seg = seg.strip()
+        if not seg:
+            continue
+        conj_parts = re.split(conjunction_pattern, seg, flags=re.IGNORECASE)
+        current = ""
+        for p in conj_parts:
+            p = p.strip()
+            if not p:
+                continue
+            if re.fullmatch(conjunction_pattern, p, flags=re.IGNORECASE):
+                if current.strip():
+                    clauses.append(current.strip())
+                    current = ""
+            else:
+                sub_parts = re.split(aux_boundary_pattern, p, flags=re.IGNORECASE)
+                accum = ""
+                for sp in sub_parts:
+                    sp = sp.strip()
+                    if not sp:
+                        continue
+                    if re.fullmatch(r'\b(tha|thi|the|hai|hain|hoga|hogi|gaya|gayi|raha|rahi)\b', sp, flags=re.IGNORECASE):
+                        accum = (accum + " " + sp).strip()
+                        clauses.append(accum)
+                        accum = ""
+                    else:
+                        if accum:
+                            clauses.append(accum)
+                            accum = sp
+                        else:
+                            accum = sp
+                if accum.strip():
+                    current = accum.strip()
+        if current.strip():
+            clauses.append(current.strip())
+            
+    return clauses if clauses else [s]
+
+
 class DimABSAInferenceEngine:
     """
-    Scientifically correct Inference Engine for Aspect-Based Emotion Regression.
-    Extracts aspects individually and predicts distinct (Valence, Arousal) scores for each aspect.
+    Inference Engine powered by NSSG-DimNet (Neuro-Symbolic Switch-Gated Dual-Graph Network).
+    Performs precise Aspect-Opinion span extraction and continuous (Valence, Arousal) regression.
     """
 
     def __init__(self, model_path: str = None, device: torch.device = DEVICE):
@@ -94,10 +151,12 @@ class DimABSAInferenceEngine:
         self.transformer = AutoModel.from_pretrained(model_source).to(self.device)
         self.transformer.eval()
 
-        self.model = AspectEmotionRegressor(
-            emb_dim=2304,
-            lex_dim=15,
-            hidden_dim=256,
+        self.model = NSSGDimNet(
+            hidden_dim=768,
+            switch_dim=64,
+            span_dim=128,
+            graph_dim=128,
+            lex_dim=3,
             max_dist=MAX_DISTANCE,
         ).to(self.device)
 
@@ -106,61 +165,41 @@ class DimABSAInferenceEngine:
             if "model_state_dict" in state_dict:
                 state_dict = state_dict["model_state_dict"]
             self.model.load_state_dict(state_dict, strict=False)
-            print(f"Loaded fine-tuned AspectEmotionRegressor from {self.model_path}")
+            print(f"Loaded fine-tuned NSSG-DimNet from {self.model_path}")
         else:
             print("Notice: No saved checkpoint found. Using initialized weights.")
 
         self.model.eval()
 
-    def _split_clauses(self, sentence: str):
+    def _extract_opinion_from_clause(self, clause: str, aspect: str):
         """
-        Split sentence into semantic clauses on conjunctions AND Hinglish
-        tense-change markers (tha/thi/hai/hain/the) that signal clause boundaries.
-        Returns list of (clause_text, original_tokens_range) tuples.
+        Extracts the opinion phrase associated with the aspect in the given clause.
         """
-        # Delimiters: English conjunctions + Hinglish tense markers
-        DELIMITERS = (
-            r"\b(but|lekin|magar|parantu|par|kintu|aur|and|or|phir|waise"
-            r"|tha|thi|the|hai|hain|ho|hoga|hogi|tha ki|thi ki)\b"
-        )
-        parts = re.split(DELIMITERS, sentence, flags=re.IGNORECASE)
-        # Keep only non-delimiter, non-empty parts
-        clauses = []
-        for p in parts:
-            p = p.strip()
-            if p and not re.fullmatch(DELIMITERS[3:-3], p, flags=re.IGNORECASE):
-                clauses.append(p)
-        return clauses if clauses else [sentence]
+        clause_words = clause.split()
+        asp_words = [w.lower() for w in aspect.split()]
 
-    def _best_opinion_from_clause(self, clause: str, aspect: str):
-        """
-        From a clause, pick the best opinion:
-        1. Prefer a word present in the Hinglish lexicon (strongest signal first).
-        2. Fall back to clause text minus the aspect.
-        """
-        from backend.model import HINGLISH_AFFECT_LEXICON
-        words = re.findall(r"\w+", clause.lower())
-        # Sort lexicon hits by |valence - 0.5| + |arousal - 0.5| (strongest affect first)
-        hits = [(w, abs(HINGLISH_AFFECT_LEXICON[w][0] - 0.5) + abs(HINGLISH_AFFECT_LEXICON[w][1] - 0.5))
-                for w in words if w in HINGLISH_AFFECT_LEXICON]
-        if hits:
-            hits.sort(key=lambda x: x[1], reverse=True)
-            return hits[0][0]
-        # Fallback: clause minus aspect term
-        op = re.sub(rf"\b{re.escape(aspect)}\b", "", clause, flags=re.IGNORECASE).strip()
-        op = re.sub(r"^(the|a|an|is|are|was|were|hai|hain|tha|thi|ka|ki|ke|ko|se)\s+", "", op, flags=re.IGNORECASE).strip()
-        return op if op else clause
+        # Remove aspect words
+        op_words = [w for w in clause_words if w.lower() not in asp_words]
+        
+        # Strip leading prepositional/auxiliary markers (ka, ki, ke, me, mein, par, the, a, etc.)
+        leading_stop = {"ka", "ki", "ke", "ko", "se", "me", "mein", "par", "the", "a", "an", "ye", "yeh", "wo", "woh", "is", "us", "movie", "match", "film", "game"}
+        while op_words and op_words[0].lower() in leading_stop:
+            op_words = op_words[1:]
+
+        op_str = " ".join(op_words).strip()
+        return op_str if op_str else clause
 
     def extract_aspects_and_opinions(self, sentence: str):
         sentence = sentence.strip()
         if not sentence:
             return []
 
+        # Domain aspect dictionary
         domain_aspects = [
-            "battery life", "battery", "camera quality", "camera", "display", "screen",
+            "battery life", "battery backup", "battery", "camera quality", "camera", "display", "screen",
             "food", "service", "acting", "story", "price", "cost", "climax", "direction",
             "faculty", "placement", "teacher", "batting", "bowling", "sound", "performance",
-            "room", "speed", "build", "quality", "design", "hotel", "match", "kafil",
+            "room", "speed", "build", "quality", "design", "hotel", "kafil",
             "haram ka paisa", "halal ki roti", "traders", "desh ke business", "justice",
             "govt", "business", "maal", "development", "guruji", "sarkar", "parda",
             "fashion", "squad", "sid", "asim", "tweets", "pyaar", "alt", "party", "insaan",
@@ -168,68 +207,56 @@ class DimABSAInferenceEngine:
         ]
 
         sent_lower = sentence.lower()
-        found_aspects = [da for da in domain_aspects
-                         if re.search(rf"\b{re.escape(da)}\b", sent_lower)]
+        clauses = split_hinglish_clauses(sentence)
 
-        # Filter substrings
-        if found_aspects:
-            found_aspects = [a for a in found_aspects
-                             if not any(a != o and a in o for o in found_aspects)]
+        extracted_pairs = []
 
-        clauses = self._split_clauses(sentence)
-
-        if found_aspects:
-            pairs = []
-            for asp in found_aspects:
-                # Find the clause that contains this aspect
-                matched_clause = sentence  # fallback
-                for c in clauses:
-                    if re.search(rf"\b{re.escape(asp)}\b", c, flags=re.IGNORECASE):
-                        matched_clause = c
-                        break
-                op = self._best_opinion_from_clause(matched_clause, asp)
-                pairs.append((asp, op, matched_clause))
-            return pairs
-
-        # Fallback: clause-based extraction
-        pairs = []
-        if len(clauses) > 1:
-            for clause in clauses:
-                words = clause.split()
-                if len(words) > 1 and words[0].lower() in ["the", "a", "an", "ye", "yeh", "apne"]:
-                    words = words[1:]
-                if len(words) >= 2:
-                    asp = " ".join(words[:2]) if len(words) > 3 else words[0]
-                    op = " ".join(words[2:]) if len(words) > 3 else " ".join(words[1:])
-                    pairs.append((asp, op, clause))
-                elif len(words) == 1:
-                    pairs.append((words[0], words[0], clause))
-        else:
-            words = sentence.split()
-            if len(words) > 1 and words[0].lower() in ["the", "a", "an", "ye", "yeh", "apne"]:
-                words = words[1:]
-            if len(words) >= 3:
-                pairs.append((" ".join(words[:2]), " ".join(words[2:]), sentence))
-            elif len(words) >= 2:
-                pairs.append((words[0], " ".join(words[1:]), sentence))
+        for clause in clauses:
+            cl_lower = clause.lower()
+            matched_aspects = [da for da in domain_aspects if re.search(rf"\b{re.escape(da)}\b", cl_lower)]
+            
+            # Filter substring overlaps (e.g. keep 'battery backup' over 'battery')
+            if matched_aspects:
+                matched_aspects = [a for a in matched_aspects if not any(a != o and a in o for o in matched_aspects)]
+                for asp in matched_aspects:
+                    op = self._extract_opinion_from_clause(clause, asp)
+                    extracted_pairs.append((asp, op, clause))
             else:
-                pairs.append((sentence, sentence, sentence))
+                # Fallback heuristic for clauses without exact domain dictionary match
+                words = clause.split()
+                if len(words) >= 2:
+                    # Filter leading articles/demonstratives
+                    if words[0].lower() in ["the", "a", "an", "ye", "yeh", "apne", "is"]:
+                        words = words[1:]
+                    if len(words) >= 3:
+                        asp = words[0]
+                        op = " ".join(words[1:])
+                    elif len(words) == 2:
+                        asp = words[0]
+                        op = words[1]
+                    else:
+                        asp = clause
+                        op = clause
+                    extracted_pairs.append((asp, op, clause))
 
-        return pairs
+        return extracted_pairs if extracted_pairs else [(sentence, sentence, sentence)]
 
-    def predict_single_aspect(self, sentence: str, aspect: str, opinion: str,
-                              clause: str = None):
+    def predict_single_aspect(self, sentence: str, aspect: str, opinion: str, clause: str = None):
         """
-        Predicts (Valence, Arousal) for a single aspect-opinion pair.
-        Uses the aspect's clause as encoding context (not the full sentence)
-        so the CLS embedding is scoped to the local sentiment.
+        Runs NSSG-DimNet inference for an aspect-opinion pair in context.
         """
-        # Use clause-scoped encoding — aspect sees only its own clause context
-        encoding_text = clause if clause else sentence
-        aspect_opinion_prompt = f"Aspect: {aspect} | Opinion: {opinion}"
+        eval_context = clause if clause else sentence
+        words = eval_context.split()
+        if not words:
+            words = ["sentence"]
+
+        langs = infer_word_languages(words)
+        sw_dists = calculate_switch_distance(langs, MAX_DISTANCE)
+        sw_idx_list = [distance_to_index(d, MAX_DISTANCE) for d in sw_dists]
+
         encoding = self.tokenizer(
-            text=encoding_text,
-            text_pair=aspect_opinion_prompt,
+            words,
+            is_split_into_words=True,
             truncation=True,
             padding="max_length",
             max_length=MAX_LEN,
@@ -238,28 +265,74 @@ class DimABSAInferenceEngine:
 
         input_ids = encoding["input_ids"].to(self.device)
         attention_mask = encoding["attention_mask"].to(self.device)
+        word_ids = encoding.word_ids(batch_index=0)
 
-        switch_ids = compute_switch_ids_for_tokens(
-            sentence=encoding_text,
-            code_switch_raw="",
-            tokenizer=self.tokenizer,
-            max_len=MAX_LEN,
-            max_distance=MAX_DISTANCE,
-        ).unsqueeze(0).to(self.device)
+        # Token switch ids
+        token_sw = []
+        for wid in word_ids:
+            if wid is None or wid >= len(sw_idx_list):
+                token_sw.append(MAX_DISTANCE)
+            else:
+                token_sw.append(sw_idx_list[wid])
+        if len(token_sw) < MAX_LEN:
+            token_sw.extend([MAX_DISTANCE] * (MAX_LEN - len(token_sw)))
+        else:
+            token_sw = token_sw[:MAX_LEN]
+        switch_ids = torch.tensor([token_sw], dtype=torch.long).to(self.device)
 
-        lex_feats = build_lexicon_features_tensor([opinion], [encoding_text], [aspect]).to(self.device)
+        # Aspect & Opinion subword masks
+        asp_words = [w.lower() for w in aspect.split()]
+        op_words = [w.lower() for w in opinion.split()]
+
+        asp_mask = np.zeros(MAX_LEN, dtype=np.float32)
+        op_mask = np.zeros(MAX_LEN, dtype=np.float32)
+
+        for ti, wid in enumerate(word_ids[:MAX_LEN]):
+            if wid is not None and wid < len(words):
+                w = words[wid].lower()
+                if w in asp_words:
+                    asp_mask[ti] = 1.0
+                if w in op_words:
+                    op_mask[ti] = 1.0
+        if asp_mask.sum() == 0:
+            asp_mask[0] = 1.0
+        if op_mask.sum() == 0:
+            op_mask[0] = 1.0
+
+        asp_mask_t = torch.from_numpy(asp_mask).unsqueeze(0).float().to(self.device)
+        op_mask_t = torch.from_numpy(op_mask).unsqueeze(0).float().to(self.device)
+
+        # Adjacency tensor [1, 3, MAX_LEN, MAX_LEN]
+        adj = construct_heterogeneous_adj(words, langs, asp_words, op_words, max_len=MAX_LEN).unsqueeze(0).to(self.device)
+
+        # Token Lexicon features [1, MAX_LEN, 3]
+        lex_tokens = extract_token_lexicon_features(words, max_len=MAX_LEN).unsqueeze(0).to(self.device)
+
+        # Opinion Lexicon Prior [1, 3]
+        op_v, op_a, op_hit = 0.5, 0.5, 0.0
+        op_clean_words = [re.sub(r'[^\w]', '', w.lower()) for w in opinion.split()]
+        hits = [HINGLISH_AFFECT_LEXICON[w] for w in op_clean_words if w in HINGLISH_AFFECT_LEXICON]
+        if hits:
+            op_v = float(np.mean([h[0] for h in hits]))
+            op_a = float(np.mean([h[1] for h in hits]))
+            op_hit = 1.0
+        op_prior_t = torch.tensor([[op_v, op_a, op_hit]], dtype=torch.float).to(self.device)
 
         with torch.inference_mode():
             out = self.transformer(input_ids=input_ids, attention_mask=attention_mask)
-            hidden = out.last_hidden_state  # [1, 128, 768]
+            token_embs = out.last_hidden_state  # [1, MAX_LEN, 768]
 
-            cls_rep = hidden[:, 0]
-            mask_exp = attention_mask.unsqueeze(-1).expand_as(hidden)
-            mean_rep = torch.sum(hidden * mask_exp, dim=1) / mask_exp.sum(dim=1).clamp(min=1)
-            max_rep = torch.max(hidden + (1.0 - mask_exp) * -1e9, dim=1).values
-            joint_rep = torch.cat([cls_rep, mean_rep, max_rep], dim=-1)
+            outputs = self.model(
+                token_embs=token_embs,
+                switch_ids=switch_ids,
+                adj_matrices=adj,
+                lex_token_feats=lex_tokens,
+                asp_mask=asp_mask_t,
+                op_mask=op_mask_t,
+                attention_mask=attention_mask,
+                opinion_lex_prior=op_prior_t,
+            )
 
-            outputs = self.model(joint_rep, switch_ids, lex_feats)
             val_score = float(outputs["valence"][0].cpu().item())
             aro_score = float(outputs["arousal"][0].cpu().item())
 
@@ -293,9 +366,15 @@ class DimABSAInferenceEngine:
 
         if custom_aspects and len(custom_aspects) > 0:
             pairs = []
+            clauses = split_hinglish_clauses(sentence)
             for asp in custom_aspects:
-                op = sentence.replace(asp, "").strip()
-                pairs.append((asp, op if op else asp, sentence))
+                matched_clause = sentence
+                for c in clauses:
+                    if re.search(rf"\b{re.escape(asp)}\b", c, flags=re.IGNORECASE):
+                        matched_clause = c
+                        break
+                op = self._extract_opinion_from_clause(matched_clause, asp)
+                pairs.append((asp, op, matched_clause))
         else:
             pairs = self.extract_aspects_and_opinions(sentence)
 

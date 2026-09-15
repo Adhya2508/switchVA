@@ -1,3 +1,5 @@
+import os
+import re
 import torch
 from torch.utils.data import Dataset, DataLoader
 import pandas as pd
@@ -7,12 +9,15 @@ from backend.preprocessing import (
     parse_set_string,
     parse_float_string,
     expand_aspect_dataset,
-    find_span,
-    word_span_to_token_span,
     parse_code_switch,
     calculate_switch_distance,
     distance_to_index,
     infer_word_languages,
+)
+from backend.model import (
+    HINGLISH_AFFECT_LEXICON,
+    extract_token_lexicon_features,
+    construct_heterogeneous_adj,
 )
 
 
@@ -68,10 +73,11 @@ def compute_switch_ids_for_tokens(
     return torch.tensor(token_switch, dtype=torch.long)
 
 
-class AspectEmotionDataset(Dataset):
+class NSSGAspectDataset(Dataset):
     """
-    Aspect-Level PyTorch Dataset for Dimensional Aspect-Based Sentiment Analysis.
-    Every sample represents ONE aspect-opinion pair in context with individual (V, A) targets.
+    Aspect-Level PyTorch Dataset for NSSG-DimNet.
+    Prepares token inputs, switch positional indices, heterogeneous adjacency matrices,
+    and affective priors for each sample.
     """
 
     def __init__(
@@ -101,96 +107,13 @@ class AspectEmotionDataset(Dataset):
         val_target = float(row["valence"])
         aro_target = float(row["arousal"])
 
-        # Construct aspect-conditioned cross-encoding input:
-        # text_a: Sentence | text_b: Aspect [SEP] Opinion
-        aspect_opinion_prompt = f"Aspect: {aspect} | Opinion: {opinion}"
-        
-        encoding = self.tokenizer(
-            text=sentence,
-            text_pair=aspect_opinion_prompt,
-            truncation=True,
-            padding="max_length",
-            max_length=self.max_len,
-            return_tensors="pt",
-        )
-
-        input_ids = encoding["input_ids"].squeeze(0)
-        attention_mask = encoding["attention_mask"].squeeze(0)
-
-        # Compute SP-GSA switch distance representation
-        code_switch_raw = row.get("code_switch", "")
-        switch_ids = compute_switch_ids_for_tokens(
-            sentence=sentence,
-            code_switch_raw=code_switch_raw,
-            tokenizer=self.tokenizer,
-            max_len=self.max_len,
-            max_distance=self.max_distance,
-        )
-
-        targets = torch.tensor([val_target, aro_target], dtype=torch.float)
-
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "switch_ids": switch_ids,
-            "target": targets,
-            "valence": val_target,
-            "arousal": aro_target,
-            "sentence": sentence,
-            "aspect": aspect,
-            "opinion": opinion,
-            "sample_id": row.get("sample_id", f"{idx}"),
-        }
-
-
-def aspect_collate_fn(batch: list):
-    return {
-        "input_ids": torch.stack([b["input_ids"] for b in batch]),
-        "attention_mask": torch.stack([b["attention_mask"] for b in batch]),
-        "switch_ids": torch.stack([b["switch_ids"] for b in batch]),
-        "target": torch.stack([b["target"] for b in batch]),
-        "valence": torch.tensor([b["valence"] for b in batch], dtype=torch.float),
-        "arousal": torch.tensor([b["arousal"] for b in batch], dtype=torch.float),
-        "sentence": [b["sentence"] for b in batch],
-        "aspect": [b["aspect"] for b in batch],
-        "opinion": [b["opinion"] for b in batch],
-        "sample_id": [b["sample_id"] for b in batch],
-    }
-
-
-class SentenceSpanDataset(Dataset):
-    """
-    Sentence-level Dataset for training and evaluating Biaffine Aspect and Opinion span extractors.
-    """
-
-    def __init__(
-        self,
-        dataframe: pd.DataFrame,
-        tokenizer,
-        max_len: int = MAX_LEN,
-        max_distance: int = MAX_DISTANCE,
-    ):
-        self.df = dataframe.copy().reset_index(drop=True)
-        self.tokenizer = tokenizer
-        self.max_len = max_len
-        self.max_distance = max_distance
-
-        if "aspect_list" not in self.df.columns and "all_aspects" in self.df.columns:
-            self.df["aspect_list"] = self.df["all_aspects"].apply(parse_set_string)
-        if "opinion_list" not in self.df.columns and "all_opinions" in self.df.columns:
-            self.df["opinion_list"] = self.df["all_opinions"].apply(parse_set_string)
-        if "valence_list" not in self.df.columns and "valence_scores" in self.df.columns:
-            self.df["valence_list"] = self.df["valence_scores"].apply(parse_float_string)
-        if "arousal_list" not in self.df.columns and "arousal_scores" in self.df.columns:
-            self.df["arousal_list"] = self.df["arousal_scores"].apply(parse_float_string)
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, idx: int):
-        row = self.df.iloc[idx]
-        sentence = str(row["sentence"])
         words = sentence.split()
+        if not words:
+            words = ["sentence"]
+
+        langs = infer_word_languages(words)
+        sw_dists = calculate_switch_distance(langs, self.max_distance)
+        sw_idx_list = [distance_to_index(d, self.max_distance) for d in sw_dists]
 
         encoding = self.tokenizer(
             words,
@@ -205,54 +128,95 @@ class SentenceSpanDataset(Dataset):
         attention_mask = encoding["attention_mask"].squeeze(0)
         word_ids = encoding.word_ids(batch_index=0)
 
-        code_switch_raw = row.get("code_switch", "")
-        switch_ids = compute_switch_ids_for_tokens(
-            sentence=sentence,
-            code_switch_raw=code_switch_raw,
-            tokenizer=self.tokenizer,
-            max_len=self.max_len,
-            max_distance=self.max_distance,
-        )
+        # Switch distance to tokens
+        token_sw = []
+        for wid in word_ids:
+            if wid is None or wid >= len(sw_idx_list):
+                token_sw.append(self.max_distance)
+            else:
+                token_sw.append(sw_idx_list[wid])
+        if len(token_sw) < self.max_len:
+            token_sw.extend([self.max_distance] * (self.max_len - len(token_sw)))
+        else:
+            token_sw = token_sw[:self.max_len]
+        token_sw_t = torch.tensor(token_sw, dtype=torch.long)
 
-        aspect_matrix = torch.zeros(self.max_len, self.max_len, dtype=torch.float)
-        opinion_matrix = torch.zeros(self.max_len, self.max_len, dtype=torch.float)
+        # Subword masks for aspect and opinion
+        asp_words = [w.lower() for w in aspect.split()]
+        op_words = [w.lower() for w in opinion.split()]
 
-        for aspect in row.get("aspect_list", []):
-            span = find_span(words, aspect)
-            if span is not None:
-                token_span = word_span_to_token_span(word_ids, span[0], span[1])
-                if token_span is not None:
-                    s, e = token_span
-                    if s < self.max_len and e < self.max_len:
-                        aspect_matrix[s, e] = 1.0
+        asp_mask = np.zeros(self.max_len, dtype=np.float32)
+        op_mask = np.zeros(self.max_len, dtype=np.float32)
 
-        for opinion in row.get("opinion_list", []):
-            span = find_span(words, opinion)
-            if span is not None:
-                token_span = word_span_to_token_span(word_ids, span[0], span[1])
-                if token_span is not None:
-                    s, e = token_span
-                    if s < self.max_len and e < self.max_len:
-                        opinion_matrix[s, e] = 1.0
+        for ti, wid in enumerate(word_ids[:self.max_len]):
+            if wid is not None and wid < len(words):
+                w = words[wid].lower()
+                if w in asp_words:
+                    asp_mask[ti] = 1.0
+                if w in op_words:
+                    op_mask[ti] = 1.0
+        if asp_mask.sum() == 0:
+            asp_mask[0] = 1.0
+        if op_mask.sum() == 0:
+            op_mask[0] = 1.0
+
+        # Adjacency tensor [3, max_len, max_len]
+        adj = construct_heterogeneous_adj(words, langs, asp_words, op_words, max_len=self.max_len)
+
+        # Token Lexicon Features [max_len, 3]
+        lex_tokens = extract_token_lexicon_features(words, max_len=self.max_len)
+
+        # Opinion Lexicon Prior [3] (Valence, Arousal, IsHit)
+        op_v, op_a, op_hit = 0.5, 0.5, 0.0
+        op_clean_words = [re.sub(r'[^\w]', '', w.lower()) for w in opinion.split()]
+        hits = [HINGLISH_AFFECT_LEXICON[w] for w in op_clean_words if w in HINGLISH_AFFECT_LEXICON]
+        if hits:
+            op_v = float(np.mean([h[0] for h in hits]))
+            op_a = float(np.mean([h[1] for h in hits]))
+            op_hit = 1.0
+        op_prior_t = torch.tensor([op_v, op_a, op_hit], dtype=torch.float)
+
+        targets = torch.tensor([val_target, aro_target], dtype=torch.float)
 
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "switch_ids": switch_ids,
-            "aspect_matrix": aspect_matrix,
-            "opinion_matrix": opinion_matrix,
+            "switch_ids": token_sw_t,
+            "adj": adj,
+            "lex_tokens": lex_tokens,
+            "asp_mask": torch.tensor(asp_mask, dtype=torch.float),
+            "op_mask": torch.tensor(op_mask, dtype=torch.float),
+            "op_prior": op_prior_t,
+            "target": targets,
+            "valence": val_target,
+            "arousal": aro_target,
             "sentence": sentence,
-            "words": words,
+            "aspect": aspect,
+            "opinion": opinion,
+            "sample_id": row.get("sample_id", f"{idx}"),
         }
 
 
-def sentence_collate_fn(batch: list):
+def nssg_collate_fn(batch: list):
     return {
         "input_ids": torch.stack([b["input_ids"] for b in batch]),
         "attention_mask": torch.stack([b["attention_mask"] for b in batch]),
         "switch_ids": torch.stack([b["switch_ids"] for b in batch]),
-        "aspect_matrix": torch.stack([b["aspect_matrix"] for b in batch]),
-        "opinion_matrix": torch.stack([b["opinion_matrix"] for b in batch]),
+        "adj": torch.stack([b["adj"] for b in batch]),
+        "lex_tokens": torch.stack([b["lex_tokens"] for b in batch]),
+        "asp_mask": torch.stack([b["asp_mask"] for b in batch]),
+        "op_mask": torch.stack([b["op_mask"] for b in batch]),
+        "op_prior": torch.stack([b["op_prior"] for b in batch]),
+        "target": torch.stack([b["target"] for b in batch]),
+        "valence": torch.tensor([b["valence"] for b in batch], dtype=torch.float),
+        "arousal": torch.tensor([b["arousal"] for b in batch], dtype=torch.float),
         "sentence": [b["sentence"] for b in batch],
-        "words": [b["words"] for b in batch],
+        "aspect": [b["aspect"] for b in batch],
+        "opinion": [b["opinion"] for b in batch],
+        "sample_id": [b["sample_id"] for b in batch],
     }
+
+
+# Backwards compatibility alias
+AspectEmotionDataset = NSSGAspectDataset
+aspect_collate_fn = nssg_collate_fn

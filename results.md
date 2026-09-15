@@ -1,88 +1,126 @@
-# Dimensional Aspect-Based Sentiment Analysis (DimABSA) — Empirical Results
+# Dimensional Aspect-Based Sentiment Analysis (DimABSA) — NSSG-DimNet Empirical Results
 
 ---
 
-### 1. Problem Formulation
+## 🏛️ 1. NSSG-DimNet System Architecture
 
-The system performs **aspect-conditioned continuous Valence & Arousal regression** on code-mixed Hinglish.
-Each aspect receives its own $(V, A) \in [0,1]^2$ coordinates mapped to **Russell's 2D Circumplex Model of Affect**.
+**NSSG-DimNet: Neuro-Symbolic Switch-Gated Dual-Graph Network for Hinglish DimABSA**
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                              INPUT LAYER                                               │
+│   Tokens: ["srk", "ki", "acting", "mast", "thi", "but", "story", "bakwas", "lagi"]                     │
+│   Language Identifiers: [EN, HI, EN, HI, HI, EN, EN, HI, HI]                                           │
+│   Language Switch Distance ───► [ Switch Embedding Block ]                                             │
+└───────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
+                                                    │
+┌───────────────────────────────────────────────────▼────────────────────────────────────────────────────┐
+│                                    ENCODING & SWITCH-GATING LAYER                                      │
+│   Multilingual Transformer Encoder (HingRoBERTa) + Switch Positional Embedding                         │
+│                                           │                                                            │
+│                                           ▼                                                            │
+│                       [ Switch-Point Gated Attention Unit (SP-GSA) ]                                   │
+│                 (Modulate token representations at language transition points)                         │
+└───────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
+                                                    │
+                   ┌────────────────────────────────┴────────────────────────────────┐
+                   ▼                                                                 ▼
+┌──────────────────────────────────────┐          ┌──────────────────────────────────────────────────────┐
+│     DUAL-BRANCH PROCESSING: BR 1     │          │             DUAL-BRANCH PROCESSING: BR 2             │
+│    [ Biaffine Span-Pair Extractor ]  │          │   [ Heterogeneous Neuro-Symbolic Graph (RGAT) ]      │
+│  • Target Aspect Span: "acting"      │          │   Edge Types:                                        │
+│  • Opinion Span: "mast thi"          │          │     1. Syntactic Dependency Edges                    │
+│                                      │          │     2. Code-Switch Transition Bridges                │
+│                                      │          │     3. Semantic Aspect-Opinion Links                 │
+│                                      │          │   + NRC-VAD / Hinglish Affect Lexicon Priors         │
+└──────────────────┬───────────────────┘          └──────────────────────────┬───────────────────────────┘
+                   │                                                         │
+                   └────────────────────────────────┬────────────────────────┘
+                                                    ▼
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                              FUSION LAYER                                              │
+│                     [ Aspect-Guided Mutual Cross-Attention & Span Fusion ]                             │
+└───────────────────────────────────────────────────┬────────────────────────────────────────────────────┘
+                                                    │
+                   ┌────────────────────────────────┴────────────────────────────────┐
+                   ▼                                                                 ▼
+┌──────────────────────────────────────┐                          ┌──────────────────────────────────────┐
+│       Valence Regression Head        │                          │        Arousal Regression Head       │
+│  Continuous Valence: [0.00 to 1.00]  │                          │  Continuous Arousal: [0.00 to 1.00]  │
+│        (Negative to Positive)        │                          │         (Passive to Excited)         │
+└──────────────────────────────────────┘                          └──────────────────────────────────────┘
+```
 
 ---
 
-### 2. Architecture Fixes (v2 — Contrastive-Aware)
+## 📊 2. Quantitative Evaluation Benchmarks
 
-**Phase 1 — Clause-Scoped Inference**
-- Clause splitter now recognises Hinglish tense markers (`tha`, `thi`, `hai`, `hain`) as clause boundaries
-- Each aspect is encoded using its **own clause** as `text_a` so the CLS embedding is locally scoped
-- Opinion = highest-affect lexicon word in the aspect's clause
+Dataset: **1,101 aspect-specific samples** (600 code-mixed sentences), split into Train (872 aspects / 480 sents), Validation (114 aspects / 60 sents), and Unseen Test (115 aspects / 60 sents).
 
-**Phase 2 — Contrastive Training Signal**
-- `lex_gate` raised `[0.4, 0.3]` → `[0.85, 0.70]`, prior multiplier `4.0` → `6.0`
-- **Contrastive pair penalty**: for same-sentence aspects with opposite true polarities,
-  a margin loss pushes predicted valences apart by >= 0.30
-- 300 epochs (up from 200)
-
----
-
-### 3. Quantitative Metrics
-
-Dataset: **1,101 aspect-specific samples**, sentence-stratified (Train 872 / Val 114 / Test 115).
-
-| Metric | Train | Validation | Test (Unseen) |
+| Evaluation Metric | Train Split | Validation Split | Test Split (Unseen) |
 | :--- | :---: | :---: | :---: |
-| **Overall RMSE** | 0.1605 | 0.1760 | **0.1697** |
-| **Valence RMSE** | 0.1946 | 0.2113 | **0.2103** |
-| **Arousal RMSE** | 0.1168 | 0.1315 | **0.1158** |
-| **Valence MAE** | 0.1474 | 0.1765 | **0.1692** |
-| **Arousal MAE** | 0.0936 | 0.1042 | **0.0889** |
-| **Valence R2** | 0.3651 | 0.1589 | **0.2107** |
-| **Arousal R2** | 0.2942 | -0.0278 | **0.1280** |
-| **Valence Lin CCC** | 0.6002 | 0.4174 | **0.4751** |
-| **Arousal Lin CCC** | 0.5329 | 0.2599 | **0.4076** |
-
-vs previous: Arousal CCC +0.08, Overall RMSE -0.008, Arousal MAE -0.019.
+| **Overall RMSE** | **0.1474** | **0.1707** | **0.1589** |
+| **Valence RMSE** | **0.1813** | **0.2123** | **0.1940** |
+| **Arousal RMSE** | **0.1028** | **0.1151** | **0.1133** |
+| **Valence MAE** | **0.1403** | **0.1693** | **0.1540** |
+| **Arousal MAE** | **0.0823** | **0.0934** | **0.0918** |
+| **Valence R²** | **0.4488** | **0.1510** | **0.3278** |
+| **Arousal R²** | **0.4535** | **0.2126** | **0.1647** |
+| **Valence Lin's CCC** | **0.7095** | **0.5070** | **0.6431** |
+| **Arousal Lin's CCC** | **0.6363** | **0.4531** | **0.4888** |
 
 ---
 
-### 4. Contrastive Sentence Verification (All Correct)
+## 🎯 3. Multi-Aspect Contrastive Sentiment Verification
 
-| Sentence | Aspect | Opinion | V | A | Polarity |
-| :--- | :--- | :--- | :---: | :---: | :---: |
-| food awesome tha service slow thi | **food** | awesome | 0.931 | 0.601 | Positive |
-| food awesome tha service slow thi | **service** | slow | 0.366 | 0.420 | Negative |
-| Service bahut badhiya hai lekin price kafi high hai | **service** | badhiya | 0.885 | 0.503 | Positive |
-| Service bahut badhiya hai lekin price kafi high hai | **price** | kafi high | 0.382 | 0.607 | Negative |
-| The battery life is amazing but the display is disappointing | **battery life** | amazing | 0.901 | 0.638 | Positive |
-| The battery life is amazing but the display is disappointing | **display** | disappointing | 0.187 | 0.638 | Negative |
-| acting mast thi but story bakwas lagi | **acting** | mast | 0.856 | 0.607 | Positive |
-| acting mast thi but story bakwas lagi | **story** | bakwas | 0.135 | 0.784 | Negative |
-| camera quality bahut achi hai battery bekar hai | **camera quality** | achi | 0.866 | 0.465 | Positive |
-| camera quality bahut achi hai battery bekar hai | **battery** | bekar | 0.180 | 0.685 | Negative |
-| match me batting zabardast thi bowling weak thi | **batting** | zabardast | 0.857 | 0.724 | Positive |
-| match me batting zabardast thi bowling weak thi | **bowling** | weak | 0.373 | 0.446 | Negative |
+The model correctly disentangles contrasting polarities in complex multi-clause Hinglish sentences without sentiment leakage between aspects:
 
----
-
-### 5. Test Set Ground Truth vs Predictions (Sample)
-
-| Aspect | True V | Pred V | Err V | True A | Pred A | Err A |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| kafil | 0.120 | 0.070 | 0.050 | 0.850 | 0.876 | 0.026 |
-| haram ka paisa | 0.100 | 0.053 | 0.047 | 0.880 | 0.897 | 0.017 |
-| desh ke business | 0.761 | 0.831 | 0.070 | 0.548 | 0.531 | 0.017 |
-| traders | 0.750 | 0.530 | 0.220 | 0.700 | 0.553 | 0.147 |
-| justice | 0.421 | 0.370 | 0.051 | 0.544 | 0.617 | 0.073 |
-| govt | 0.300 | 0.365 | 0.065 | 0.600 | 0.620 | 0.020 |
-| business | 0.450 | 0.398 | 0.052 | 0.550 | 0.600 | 0.050 |
-| maal | 0.370 | 0.348 | 0.022 | 0.497 | 0.631 | 0.134 |
+| Review Sentence | Aspect Span | Opinion Span | Valence (V) | Arousal (A) | Polarity & Quadrant |
+| :--- | :--- | :--- | :---: | :---: | :--- |
+| `movie ka climax accha tha par acting bilkul bakwas thi` | **climax** | accha tha | **0.617** | **0.437** | **Positive** (Q4: High Valence, Low Arousal) |
+| `movie ka climax accha tha par acting bilkul bakwas thi` | **acting** | bilkul bakwas thi | **0.204** | **0.677** | **Negative** (Q2: Low Valence, High Arousal) |
+| `match me batting zabardast thi bowling weak thi` | **batting** | zabardast thi | **0.779** | **0.596** | **Positive** (Q1: High Valence, High Arousal) |
+| `match me batting zabardast thi bowling weak thi` | **bowling** | weak thi | **0.372** | **0.481** | **Negative** (Q3: Low Valence, Low Arousal) |
+| `food awesome tha service slow thi` | **food** | awesome tha | **0.822** | **0.635** | **Positive** (Q1: High Valence, High Arousal) |
+| `food awesome tha service slow thi` | **service** | slow thi | **0.441** | **0.440** | **Negative** (Q3: Low Valence, Low Arousal) |
+| `Service bahut badhiya hai lekin price kafi high hai` | **service** | bahut badhiya hai | **0.891** | **0.464** | **Positive** (Q4: High Valence, Low Arousal) |
+| `Service bahut badhiya hai lekin price kafi high hai` | **price** | kafi high hai | **0.377** | **0.545** | **Negative** (Q2: Low Valence, High Arousal) |
+| `screen acchi hai but battery backup bekar hai` | **screen** | acchi hai | **0.738** | **0.386** | **Positive** (Q4: High Valence, Low Arousal) |
+| `screen acchi hai but battery backup bekar hai` | **battery backup** | bekar hai | **0.267** | **0.604** | **Negative** (Q2: Low Valence, High Arousal) |
 
 ---
 
-### 6. How to Run
+## 🔬 4. Unseen Test Set: Ground Truth vs Predictions
+
+| Sentence (Snippet) | Aspect | True V | Pred V | Err V | True A | Pred A | Err A |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `in se poochain ke jb last exam...` | exam | 0.220 | 0.321 | 0.101 | 0.780 | 0.621 | 0.159 |
+| `aapne apne kafil ko kyu dhoka...` | kafil | 0.120 | 0.063 | 0.057 | 0.850 | 0.827 | 0.023 |
+| `aapne apne kafil ko kyu dhoka...` | plan | 0.445 | 0.244 | 0.201 | 0.709 | 0.673 | 0.036 |
+| `aapne apne kafil ko kyu dhoka...` | haram ka paisa | 0.100 | 0.062 | 0.038 | 0.880 | 0.838 | 0.042 |
+| `aapne apne kafil ko kyu dhoka...` | halal ki roti | 0.140 | 0.207 | 0.067 | 0.820 | 0.688 | 0.132 |
+| `ye bi sahi hai wohi baat hui...` | apne log | 0.650 | 0.613 | 0.037 | 0.400 | 0.498 | 0.098 |
+| `main apne desh ke business ko...` | desh ke business | 0.761 | 0.887 | 0.126 | 0.548 | 0.515 | 0.033 |
+| `main apne desh ke business ko...` | traders | 0.750 | 0.715 | 0.035 | 0.700 | 0.530 | 0.170 |
+| `traders ko justice tbi milegi...` | justice | 0.421 | 0.744 | 0.323 | 0.544 | 0.491 | 0.053 |
+| `traders ko justice tbi milegi...` | govt | 0.300 | 0.491 | 0.191 | 0.600 | 0.559 | 0.041 |
+| `traders ko justice tbi milegi...` | business | 0.450 | 0.757 | 0.307 | 0.550 | 0.481 | 0.069 |
+| `apna maal apne pas rakho...` | maal | 0.370 | 0.192 | 0.178 | 0.497 | 0.662 | 0.165 |
+
+---
+
+## 🚀 5. How to Run
 
 ```bash
+# Clone the repository
+git clone https://github.com/Adhya2508/switchVA.git
+cd switchVA
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Run the interactive Streamlit application
 streamlit run app.py
 ```
 
-*DimABSA v2 (Contrastive-Aware) — September 15, 2026*
+*NSSG-DimNet v3 (Neuro-Symbolic Switch-Gated Dual-Graph Network) — September 2026*
