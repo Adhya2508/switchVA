@@ -45,7 +45,7 @@ html, body { overflow: auto !important; height: auto !important; }
     overflow: visible !important;
     height: auto !important;
 }
-.block-container { padding: 1rem 2rem 2rem 2rem !important; max-width: 100% !important; overflow: visible !important; }
+.block-container { padding: 3.5rem 2rem 2rem 2rem !important; max-width: 100% !important; overflow: visible !important; }
 section[data-testid="stSidebar"] { display: none !important; }
 
 /* Top nav */
