@@ -38,7 +38,14 @@ html, body, [class*="css"] {
     background-color: #0d1117 !important;
     color: #e2e8f0;
 }
-.block-container { padding: 0 2rem 2rem 2rem !important; max-width: 100% !important; }
+/* Ensure the page is scrollable */
+html, body { overflow: auto !important; height: auto !important; }
+.main, section.main, [data-testid="stAppViewContainer"],
+[data-testid="stMain"], [data-testid="stMainBlockContainer"] {
+    overflow: visible !important;
+    height: auto !important;
+}
+.block-container { padding: 0 2rem 2rem 2rem !important; max-width: 100% !important; overflow: visible !important; }
 section[data-testid="stSidebar"] { display: none !important; }
 
 /* Top nav */
