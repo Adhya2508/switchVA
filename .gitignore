@@ -13,6 +13,7 @@ ENV/
 pretrained_models/
 *.bin
 *.pt
+!models/best_dimabsa_model.pt
 *.pth
 *.safetensors
 *.ckpt
