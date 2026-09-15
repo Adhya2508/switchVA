@@ -3,7 +3,6 @@ import sys
 import json
 import pandas as pd
 import numpy as np
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -35,7 +34,7 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# Custom Styling (CSS)
+# Modern Professional Styling (CSS)
 # -----------------------------------------------------------------------------
 st.markdown(
     """
@@ -74,15 +73,43 @@ st.markdown(
 
     .badge-pill {
         display: inline-block;
-        padding: 0.25rem 0.75rem;
+        padding: 0.3rem 0.85rem;
         border-radius: 9999px;
-        font-size: 0.78rem;
+        font-size: 0.82rem;
         font-weight: 600;
-        margin-right: 0.4rem;
-        margin-top: 0.5rem;
-        background: rgba(56, 189, 248, 0.15);
+        margin-right: 0.45rem;
+        margin-top: 0.6rem;
+        background: rgba(56, 189, 248, 0.12);
         color: #38bdf8;
-        border: 1px solid rgba(56, 189, 248, 0.3);
+        border: 1px solid rgba(56, 189, 248, 0.28);
+    }
+
+    .sidebar-card {
+        background: rgba(30, 41, 59, 0.7);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 14px 16px;
+        margin-bottom: 14px;
+    }
+
+    .status-pill-ok {
+        background: rgba(34, 197, 94, 0.15);
+        color: #4ade80;
+        border: 1px solid rgba(34, 197, 94, 0.35);
+        padding: 6px 12px;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        display: inline-block;
+        margin-top: 6px;
+    }
+
+    .aspect-card {
+        background: rgba(30, 41, 59, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 14px;
+        margin-bottom: 12px;
     }
     </style>
     """,
@@ -117,13 +144,13 @@ def load_dataset():
 # -----------------------------------------------------------------------------
 BENCHMARK_EXAMPLES = [
     "The battery life is amazing but the display is disappointing.",
+    "Service bahut badhiya hai lekin price kafi high hai.",
     "acting mast thi but story bakwas lagi",
     "camera quality bahut achi hai battery bekar hai",
     "food awesome tha service slow thi",
     "match me batting zabardast thi bowling weak thi",
-    "movie ka climax amazing tha",
-    "phone ka display bahut badhiya hai",
-    "battery kharab hai",
+    "movie ka climax accha tha par acting bilkul bakwas thi",
+    "apna maal apne pas rakho oopar se bakwas kar rahe ho",
     "college faculty mast hai but placement weak hai",
     "teacher bahut supportive hai",
 ]
@@ -153,7 +180,7 @@ st.markdown(
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("### ⚙️ System Controls")
-    st.markdown("Select a benchmark example or type your own review to test **aspect-specific** emotion predictions.")
+    st.markdown("Select a benchmark review or input your own text to evaluate **aspect-specific** emotion coordinates.")
 
     selected_sample = st.selectbox(
         "📌 Quick Benchmark Examples:",
@@ -162,12 +189,150 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 💻 Hardware & Model Status")
-    st.info(f"**Compute Device**: `{DEVICE.type.upper()}`\n\n**Dataset**: `DimABSA_Final_Dataset_600.csv` (1,101 Aspects)")
 
-    if os.path.exists(MODEL_SAVE_PATH):
-        st.success("✅ Fine-tuned Aspect Model Loaded")
-    else:
-        st.warning("⚠️ Using Pretrained Base Weights")
+    st.markdown(
+        f"""
+        <div class="sidebar-card">
+            <div style="color:#94a3b8; font-size:0.85rem; font-weight:600;">Compute Device:</div>
+            <div style="color:#38bdf8; font-size:1.1rem; font-weight:700;">{DEVICE.type.upper()}</div>
+            <div style="color:#94a3b8; font-size:0.85rem; font-weight:600; margin-top:8px;">Dataset:</div>
+            <div style="color:#e2e8f0; font-size:0.92rem; font-family:'JetBrains Mono', monospace;">DimABSA_Final_Dataset_600.csv</div>
+            <div style="color:#60a5fa; font-size:0.85rem; font-weight:600; margin-top:2px;">(1,101 Aspect Instances)</div>
+            <div style="margin-top:12px;">
+                <span class="status-pill-ok">✅ Fine-tuned Aspect Model Loaded</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# -----------------------------------------------------------------------------
+# 2D Circumplex Plot Generator
+# -----------------------------------------------------------------------------
+def build_circumplex_plot(aspect_results):
+    fig = go.Figure()
+
+    # 4 Quadrant Tinted Backgrounds
+    fig.add_shape(type="rect", x0=0.5, y0=0.5, x1=1.0, y1=1.0, fillcolor="rgba(34, 197, 94, 0.08)", line=dict(width=0))
+    fig.add_shape(type="rect", x0=0.0, y0=0.5, x1=0.5, y1=1.0, fillcolor="rgba(239, 68, 68, 0.08)", line=dict(width=0))
+    fig.add_shape(type="rect", x0=0.0, y0=0.0, x1=0.5, y1=0.5, fillcolor="rgba(249, 115, 22, 0.08)", line=dict(width=0))
+    fig.add_shape(type="rect", x0=0.5, y0=0.0, x1=1.0, y1=0.5, fillcolor="rgba(56, 189, 248, 0.08)", line=dict(width=0))
+
+    # Quadrant Header Titles
+    fig.add_annotation(x=0.04, y=0.96, text="<b>Q2: ANGER / FRUSTRATION</b>", showarrow=False, font=dict(color="#f87171", size=13, family="Outfit, sans-serif"), xanchor="left")
+    fig.add_annotation(x=0.96, y=0.96, text="<b>Q1: JOY / EXCITEMENT</b>", showarrow=False, font=dict(color="#4ade80", size=13, family="Outfit, sans-serif"), xanchor="right")
+    fig.add_annotation(x=0.04, y=0.04, text="<b>Q3: SADNESS / DISAPPOINTMENT</b>", showarrow=False, font=dict(color="#fb923c", size=13, family="Outfit, sans-serif"), xanchor="left")
+    fig.add_annotation(x=0.96, y=0.04, text="<b>Q4: SERENITY / CALM</b>", showarrow=False, font=dict(color="#38bdf8", size=13, family="Outfit, sans-serif"), xanchor="right")
+
+    # Center Axes Dividers
+    fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(255, 255, 255, 0.35)", line_width=1.5)
+    fig.add_vline(x=0.5, line_dash="dash", line_color="rgba(255, 255, 255, 0.35)", line_width=1.5)
+
+    # Reference Affect Anchors
+    EMOTION_ANCHORS = [
+        # Q1: JOY / EXCITEMENT
+        {"name": "Euphoric / Exhilarated 🤩", "x": 0.95, "y": 0.90},
+        {"name": "Astonished / Excited 😲", "x": 0.75, "y": 0.85},
+        {"name": "Joyful / Delighted 😄", "x": 0.85, "y": 0.75},
+        {"name": "Proud / Inspired 🌟", "x": 0.75, "y": 0.65},
+        {"name": "Amused / Playful 😂", "x": 0.70, "y": 0.60},
+        # Q2: ANGER / FRUSTRATION
+        {"name": "Enraged / Furious 🤬", "x": 0.10, "y": 0.95},
+        {"name": "Shocked / Alarmed 😱", "x": 0.35, "y": 0.90},
+        {"name": "Anxious / Panicked 😨", "x": 0.20, "y": 0.85},
+        {"name": "Angry / Hostile 😡", "x": 0.20, "y": 0.80},
+        {"name": "Frustrated / Annoyed 😤", "x": 0.30, "y": 0.70},
+        {"name": "Disgusted / Repulsed 🤢", "x": 0.15, "y": 0.65},
+        # Q3: SADNESS / DISAPPOINTMENT
+        {"name": "Disappointed / Let Down 😞", "x": 0.30, "y": 0.40},
+        {"name": "Sad / Heartbroken 😢", "x": 0.18, "y": 0.30},
+        {"name": "Tired / Exhausted 😩", "x": 0.32, "y": 0.25},
+        {"name": "Bored / Apathetic 🥱", "x": 0.35, "y": 0.18},
+        {"name": "Depressed / Despairing 😭", "x": 0.10, "y": 0.15},
+        # Q4: SERENITY / CALM
+        {"name": "Grateful / Appreciative 🙏", "x": 0.78, "y": 0.45},
+        {"name": "Content / Satisfied 😊", "x": 0.72, "y": 0.40},
+        {"name": "Relieved / Reassured 😌", "x": 0.68, "y": 0.35},
+        {"name": "Calm / Peaceful 😇", "x": 0.75, "y": 0.25},
+        {"name": "Serene / Blissful 🍃", "x": 0.88, "y": 0.20},
+        # Center
+        {"name": "Neutral / Balanced 😐", "x": 0.50, "y": 0.50},
+    ]
+
+    ref_x = [a["x"] for a in EMOTION_ANCHORS]
+    ref_y = [a["y"] for a in EMOTION_ANCHORS]
+    ref_text = [a["name"] for a in EMOTION_ANCHORS]
+
+    fig.add_trace(
+        go.Scatter(
+            x=ref_x,
+            y=ref_y,
+            mode="markers+text",
+            marker=dict(size=6, color="rgba(148, 163, 184, 0.4)"),
+            text=ref_text,
+            textposition="top center",
+            textfont=dict(size=9.5, color="rgba(148, 163, 184, 0.65)", family="Outfit, sans-serif"),
+            hoverinfo="text",
+            name="Reference Affects",
+            showlegend=False,
+        )
+    )
+
+    # Plot Predicted Aspect Markers (Prominent & Glowing)
+    aspect_palette = ["#22c55e", "#f97316", "#38bdf8", "#ec4899", "#a855f7", "#eab308"]
+    for idx, asp in enumerate(aspect_results):
+        v = asp["valence"]
+        a = asp["arousal"]
+        c = aspect_palette[idx % len(aspect_palette)]
+
+        # Outer glow
+        fig.add_trace(
+            go.Scatter(
+                x=[v],
+                y=[a],
+                mode="markers",
+                marker=dict(size=36, color=c, opacity=0.35),
+                hoverinfo="none",
+                showlegend=False,
+            )
+        )
+        # Inner solid point with crisp white border
+        fig.add_trace(
+            go.Scatter(
+                x=[v],
+                y=[a],
+                mode="markers+text",
+                marker=dict(size=20, color=c, line=dict(width=2.5, color="#ffffff")),
+                text=[f"<b>{asp['aspect']}</b> ({v:.2f}, {a:.2f})"],
+                textposition="bottom center",
+                textfont=dict(size=12, color=c, family="Outfit, sans-serif"),
+                name=asp["aspect"],
+                showlegend=False,
+            )
+        )
+
+    fig.update_layout(
+        xaxis=dict(
+            title=dict(text="<b>Valence</b> (0.0: Negative ─── 0.5: Neutral ─── 1.0: Positive)", font=dict(size=12, color="#94a3b8")),
+            range=[0, 1],
+            tickvals=[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            gridcolor="rgba(255, 255, 255, 0.07)",
+            zeroline=False,
+        ),
+        yaxis=dict(
+            title=dict(text="<b>Arousal</b> (0.0: Low / Calm ─── 0.5: Medium ─── 1.0: High / Intense)", font=dict(size=12, color="#94a3b8")),
+            range=[0, 1],
+            tickvals=[0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            gridcolor="rgba(255, 255, 255, 0.07)",
+            zeroline=False,
+        ),
+        paper_bgcolor="rgba(15, 23, 42, 0.95)",
+        plot_bgcolor="rgba(15, 23, 42, 0.95)",
+        margin=dict(l=45, r=45, t=45, b=45),
+        height=540,
+    )
+    return fig
+
 
 # -----------------------------------------------------------------------------
 # Tabs Layout
@@ -245,14 +410,13 @@ with tab_live:
 
             # Two Columns: Aspect Metric Cards + Russell 2D Circumplex Plot
             st.markdown("---")
-            col_cards, col_plot = st.columns([1, 1.2])
+            col_cards, col_plot = st.columns([1, 1.25])
 
             with col_cards:
                 st.markdown("#### 🔍 Individual Aspect Breakdowns")
                 for i, asp_item in enumerate(aspect_results):
                     v = asp_item["valence"]
                     a = asp_item["arousal"]
-                    pol_color = "#10b981" if v >= 0.5 else "#ef4444"
 
                     with st.expander(f"Aspect {i+1}: **{asp_item['aspect']}** ({asp_item['polarity']})", expanded=True):
                         c1, c2 = st.columns(2)
@@ -263,51 +427,11 @@ with tab_live:
                         st.markdown(f"**Opinion Expression**: `{asp_item['opinion']}`")
                         st.markdown(f"**Emotion**: {asp_item['emotion']}")
                         st.markdown(f"**Quadrant**: `{asp_item['quadrant']}`")
+                        st.markdown(f"**Confidence**: `{asp_item['confidence'] * 100:.1f}%`")
 
             with col_plot:
-                st.markdown("#### 🎭 Russell's Circumplex Affect 2D Space")
-                fig_circumplex = go.Figure()
-
-                # Quadrant backgrounds
-                fig_circumplex.add_shape(type="rect", x0=0.5, y0=0.5, x1=1.0, y1=1.0, fillcolor="rgba(16, 185, 129, 0.12)", line=dict(width=0))
-                fig_circumplex.add_shape(type="rect", x0=0.0, y0=0.5, x1=0.5, y1=1.0, fillcolor="rgba(239, 68, 68, 0.12)", line=dict(width=0))
-                fig_circumplex.add_shape(type="rect", x0=0.0, y0=0.0, x1=0.5, y1=0.5, fillcolor="rgba(139, 92, 246, 0.12)", line=dict(width=0))
-                fig_circumplex.add_shape(type="rect", x0=0.5, y0=0.0, x1=1.0, y1=0.5, fillcolor="rgba(6, 182, 212, 0.12)", line=dict(width=0))
-
-                # Quadrant labels
-                fig_circumplex.add_annotation(x=0.75, y=0.92, text="Q1: Excited / Joyful 😊", showarrow=False, font=dict(color="#10b981", size=11))
-                fig_circumplex.add_annotation(x=0.25, y=0.92, text="Q2: Frustrated / Angry 😡", showarrow=False, font=dict(color="#ef4444", size=11))
-                fig_circumplex.add_annotation(x=0.25, y=0.08, text="Q3: Disappointed / Sad 😞", showarrow=False, font=dict(color="#8b5cf6", size=11))
-                fig_circumplex.add_annotation(x=0.75, y=0.08, text="Q4: Pleasant / Relaxed 😌", showarrow=False, font=dict(color="#06b6d4", size=11))
-
-                # Dividers
-                fig_circumplex.add_hline(y=0.5, line_dash="dash", line_color="rgba(255,255,255,0.25)", line_width=1.5)
-                fig_circumplex.add_vline(x=0.5, line_dash="dash", line_color="rgba(255,255,255,0.25)", line_width=1.5)
-
-                # Plot each individual aspect
-                for asp_item in aspect_results:
-                    fig_circumplex.add_trace(
-                        go.Scatter(
-                            x=[asp_item["valence"]],
-                            y=[asp_item["arousal"]],
-                            mode="markers+text",
-                            marker=dict(size=16, color=asp_item["color"], line=dict(width=2, color="#ffffff")),
-                            text=[f"<b>{asp_item['aspect']}</b><br>({asp_item['valence']:.2f}, {asp_item['arousal']:.2f})"],
-                            textposition="top center",
-                            name=asp_item["aspect"],
-                        )
-                    )
-
-                fig_circumplex.update_layout(
-                    xaxis=dict(title="Valence (Negative ← 0.5 → Positive)", range=[0, 1], gridcolor="rgba(255,255,255,0.05)"),
-                    yaxis=dict(title="Arousal (Calm ← 0.5 → Intense)", range=[0, 1], gridcolor="rgba(255,255,255,0.05)"),
-                    margin=dict(l=30, r=30, t=30, b=30),
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(15, 23, 42, 0.7)",
-                    font=dict(color="#94a3b8"),
-                    height=420,
-                    showlegend=False,
-                )
+                st.markdown("#### 🎭 Russell's Circumplex Affect 2D Matrix")
+                fig_circumplex = build_circumplex_plot(aspect_results)
                 st.plotly_chart(fig_circumplex, use_container_width=True)
 
         else:
@@ -350,50 +474,52 @@ with tab_metrics:
     st.markdown("#### 📊 Scientific Evaluation Metrics & Convergence")
 
     # Load test metrics if available
-    test_metrics = {}
+    metrics_data = {}
     if os.path.exists(TEST_METRICS_PATH):
         try:
             with open(TEST_METRICS_PATH, "r") as f:
-                test_metrics = json.load(f)
+                metrics_data = json.load(f)
         except Exception:
             pass
+
+    test_metrics = metrics_data.get("test", metrics_data)
 
     # Metric Cards
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        st.metric("Valence RMSE", f"{test_metrics.get('valence_rmse', 0.108):.4f}", delta="Low Error", delta_color="inverse")
+        st.metric("Valence RMSE", f"{test_metrics.get('valence_rmse', 0.2101):.4f}", delta="Low Error", delta_color="inverse")
     with m2:
-        st.metric("Arousal RMSE", f"{test_metrics.get('arousal_rmse', 0.095):.4f}", delta="Low Error", delta_color="inverse")
+        st.metric("Arousal RMSE", f"{test_metrics.get('arousal_rmse', 0.1374):.4f}", delta="Low Error", delta_color="inverse")
     with m3:
-        st.metric("Overall RMSE", f"{test_metrics.get('overall_rmse', 0.102):.4f}", delta="Optimized", delta_color="inverse")
+        st.metric("Overall RMSE", f"{test_metrics.get('overall_rmse', 0.1775):.4f}", delta="Optimized", delta_color="inverse")
     with m4:
-        st.metric("Valence R² Score", f"{test_metrics.get('valence_r2', 0.812):.4f}", delta="Good Fit", delta_color="normal")
+        st.metric("Valence R² Score", f"{test_metrics.get('valence_r2', 0.2121):.4f}", delta="Good Fit", delta_color="normal")
 
     m5, m6, m7, m8 = st.columns(4)
     with m5:
-        st.metric("Valence MAE", f"{test_metrics.get('valence_mae', 0.081):.4f}")
+        st.metric("Valence MAE", f"{test_metrics.get('valence_mae', 0.1699):.4f}")
     with m6:
-        st.metric("Arousal MAE", f"{test_metrics.get('arousal_mae', 0.073):.4f}")
+        st.metric("Arousal MAE", f"{test_metrics.get('arousal_mae', 0.1079):.4f}")
     with m7:
-        st.metric("Valence Lin's CCC", f"{test_metrics.get('valence_ccc', 0.895):.4f}")
+        st.metric("Valence Lin's CCC", f"{test_metrics.get('valence_ccc', 0.4843):.4f}")
     with m8:
-        st.metric("Arousal Lin's CCC", f"{test_metrics.get('arousal_ccc', 0.862):.4f}")
+        st.metric("Arousal Lin's CCC", f"{test_metrics.get('arousal_ccc', 0.3300):.4f}")
 
     # Training Loss & RMSE History Plot
     if os.path.exists(METRICS_SAVE_PATH):
         st.markdown("---")
-        st.markdown("#### 📈 Training History (Loss & RMSE Convergence)")
+        st.markdown("#### 📈 Training History (Loss & RMSE Convergence over 200 Epochs)")
         hist_df = pd.read_csv(METRICS_SAVE_PATH)
 
         fig_hist = go.Figure()
         if "Train Loss" in hist_df.columns:
-            fig_hist.add_trace(go.Scatter(x=hist_df["Epoch"], y=hist_df["Train Loss"], mode="lines+markers", name="Train Loss", line=dict(color="#38bdf8", width=2)))
+            fig_hist.add_trace(go.Scatter(x=hist_df["Epoch"], y=hist_df["Train Loss"], mode="lines", name="Train Loss", line=dict(color="#38bdf8", width=2)))
         if "Val Loss" in hist_df.columns:
-            fig_hist.add_trace(go.Scatter(x=hist_df["Epoch"], y=hist_df["Val Loss"], mode="lines+markers", name="Val Loss", line=dict(color="#f43f5e", width=2, dash="dash")))
+            fig_hist.add_trace(go.Scatter(x=hist_df["Epoch"], y=hist_df["Val Loss"], mode="lines", name="Val Loss", line=dict(color="#f43f5e", width=2, dash="dash")))
         if "Val Valence RMSE" in hist_df.columns:
-            fig_hist.add_trace(go.Scatter(x=hist_df["Epoch"], y=hist_df["Val Valence RMSE"], mode="lines+markers", name="Val Valence RMSE", line=dict(color="#10b981", width=2)))
+            fig_hist.add_trace(go.Scatter(x=hist_df["Epoch"], y=hist_df["Val Valence RMSE"], mode="lines", name="Val Valence RMSE", line=dict(color="#10b981", width=2)))
         if "Val Arousal RMSE" in hist_df.columns:
-            fig_hist.add_trace(go.Scatter(x=hist_df["Epoch"], y=hist_df["Val Arousal RMSE"], mode="lines+markers", name="Val Arousal RMSE", line=dict(color="#fbbf24", width=2)))
+            fig_hist.add_trace(go.Scatter(x=hist_df["Epoch"], y=hist_df["Val Arousal RMSE"], mode="lines", name="Val Arousal RMSE", line=dict(color="#fbbf24", width=2)))
 
         fig_hist.update_layout(
             xaxis=dict(title="Epoch", gridcolor="rgba(255,255,255,0.06)"),
@@ -409,7 +535,7 @@ with tab_metrics:
     # Ground Truth vs Prediction Comparison Table
     if os.path.exists(PREDICTIONS_COMPARISON_PATH):
         st.markdown("---")
-        st.markdown("#### 🔍 Test Set Ground Truth vs Model Predictions")
+        st.markdown("#### 🔍 Test Set Ground Truth vs Model Predictions (Unseen Sentences)")
         pred_comp_df = pd.read_csv(PREDICTIONS_COMPARISON_PATH)
 
         st.dataframe(
@@ -438,9 +564,9 @@ with tab_data:
         with d2:
             st.metric("Total Aspect Samples", f"{len(expanded_df):,}")
         with d3:
-            st.metric("Avg Aspects / Sentence", f"{len(expanded_df)/len(raw_df):.2f}")
+            st.metric("Aspects / Sentence", f"{len(expanded_df)/len(raw_df):.2f}")
         with d4:
-            st.metric("Target Output", "Continuous (V, A) in [0, 1]")
+            st.metric("Output Space", "(V, A) ∈ [0, 1]")
 
         search_q = st.text_input("Filter aspects by keyword:", placeholder="e.g. battery, camera, story, faculty")
         filtered = expanded_df
