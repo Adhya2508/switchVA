@@ -38,14 +38,15 @@ html, body, [class*="css"] {
     background-color: #0d1117 !important;
     color: #e2e8f0;
 }
-/* Ensure the page is scrollable */
-html, body { overflow: auto !important; height: auto !important; }
-.main, section.main, [data-testid="stAppViewContainer"],
-[data-testid="stMain"], [data-testid="stMainBlockContainer"] {
-    overflow: visible !important;
-    height: auto !important;
+/* Block container spacing only — never override Streamlit scroll containers */
+.block-container {
+    padding-top: 3rem !important;
+    padding-left: 2rem !important;
+    padding-right: 2rem !important;
+    padding-bottom: 3rem !important;
+    max-width: 100% !important;
 }
-.block-container { padding: 3.5rem 2rem 2rem 2rem !important; max-width: 100% !important; overflow: visible !important; }
+[data-testid="collapsedControl"] { display: none !important; }
 section[data-testid="stSidebar"] { display: none !important; }
 
 /* Top nav */
@@ -68,7 +69,9 @@ section[data-testid="stSidebar"] { display: none !important; }
     padding: 6px 12px; border-radius: 6px;
     border: 1px solid rgba(255,255,255,0.07);
     background: rgba(255,255,255,0.03);
+    text-decoration: none; cursor: pointer;
 }
+.nav-link:hover { color: #f1f5f9; background: rgba(255,255,255,0.07); }
 
 /* Section labels */
 .section-label {
@@ -266,9 +269,9 @@ st.markdown("""
     </div>
   </div>
   <div class="nav-links">
-    <span class="nav-link">🏠 Home</span>
-    <span class="nav-link">ℹ️ About</span>
-    <span class="nav-link">❓ Help</span>
+    <a class="nav-link" href="https://github.com/Adhya2508/switchVA" target="_blank">🏠 Home</a>
+    <a class="nav-link" href="https://github.com/Adhya2508/switchVA#readme" target="_blank">ℹ️ About</a>
+    <a class="nav-link" href="https://github.com/Adhya2508/switchVA/blob/main/results.md" target="_blank">📄 Results</a>
   </div>
 </div>
 """, unsafe_allow_html=True)
