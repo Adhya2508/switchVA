@@ -154,8 +154,10 @@ class AspectEmotionRegressor(nn.Module):
 
         # Regressor head
         self.head = nn.Linear(64, 2)
-        # Learnable gating for direct lexicon prior
-        self.lex_gate = nn.Parameter(torch.tensor([0.4, 0.3]))
+        # Learnable gating for direct lexicon prior — higher initial values give
+        # the opinion-specific lexicon prior stronger influence at the start of training
+        # so the model learns to respect "awesome" vs "slow" distinction quickly.
+        self.lex_gate = nn.Parameter(torch.tensor([0.85, 0.70]))
 
     def forward(self, embs: torch.Tensor, switch_ids: torch.Tensor, lex_feats: torch.Tensor):
         B = embs.shape[0]
@@ -170,7 +172,9 @@ class AspectEmotionRegressor(nn.Module):
         prior = lex_feats[:, :2]
         gate = torch.sigmoid(self.lex_gate)
 
-        preds = torch.sigmoid(delta + (prior - 0.5) * gate * 4.0)
+        # The prior has a stronger pull (gate * 4.0 -> 6.0) so the model respects
+        # the opinion lexicon polarity more aggressively
+        preds = torch.sigmoid(delta + (prior - 0.5) * gate * 6.0)
 
         return {
             "valence": preds[:, 0],

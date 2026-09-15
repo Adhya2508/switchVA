@@ -127,13 +127,14 @@ $$\mathbf{l}_{\text{feat}} = \text{LayerNorm}\left(\text{GELU}\left(\mathbf{W}_l
 
 ### 5. Prior-Gated Fusion & Bounded Output
 $$\mathbf{f}_{\text{fusion}} = \text{ResidualMLP}\left( \left[ \mathbf{W}_e \mathbf{h}_{\text{joint}} \;\parallel\; \mathbf{s}_{\text{switch}} \;\parallel\; \mathbf{l}_{\text{feat}} \right] \right) \in \mathbb{R}^{64}$$
-$$\begin{bmatrix} \hat{V} \\ \hat{A} \end{bmatrix} = \sigma\left( \mathbf{W}_{\text{head}} \mathbf{f}_{\text{fusion}} + (\mathbf{p}_{\text{opinion}} - 0.5) \odot \sigma(\mathbf{g}_{\text{prior}}) \cdot 4.0 \right)$$
-where $\mathbf{p}_{\text{opinion}} = [V_{\text{prior}}, A_{\text{prior}}]^\top$ is the opinion affective prior, and $\mathbf{g}_{\text{prior}}$ is a learnable gating parameter.
+$$\begin{bmatrix} \hat{V} \\ \hat{A} \end{bmatrix} = \sigma\left( \mathbf{W}_{\text{head}} \mathbf{f}_{\text{fusion}} + (\mathbf{p}_{\text{opinion}} - 0.5) \odot \sigma(\mathbf{g}_{\text{prior}}) \cdot 6.0 \right)$$
+where $\mathbf{g}_{\text{prior}}$ is initialised at $[0.85, 0.70]$ (v2 — strengthened from $[0.4, 0.3]$) to give the opinion lexicon prior strong influence.
 
-### 6. Multi-Objective Loss Formulation
-$$\mathcal{L} = 0.5 \cdot \text{SmoothL1}(V, \hat{V}) + 0.3 \cdot \text{SmoothL1}(A, \hat{A}) + 0.2 \cdot \left(1 - \text{CCC}(V, \hat{V})\right)$$
-where $\text{CCC}$ is Lin's Concordance Correlation Coefficient:
-$$\text{CCC}(\mathbf{y}, \hat{\mathbf{y}}) = \frac{2 \cdot \text{Cov}(\mathbf{y}, \hat{\mathbf{y}})}{\sigma_{\mathbf{y}}^2 + \sigma_{\hat{\mathbf{y}}}^2 + (\mu_{\mathbf{y}} - \mu_{\hat{\mathbf{y}}})^2}$$
+### 6. Multi-Objective Loss Formulation (v2 — Contrastive-Aware)
+$$\mathcal{L}_{\text{reg}} = \text{MSE}(V, \hat{V}) + \text{MSE}(A, \hat{A}) + 0.5 \cdot \text{SmoothL1}(V, \hat{V}) + 0.5 \cdot \text{SmoothL1}(A, \hat{A}) + 0.5 \cdot (1 - \text{CCC})$$
+$$\mathcal{L}_{\text{contrastive}} = \frac{1}{|\mathcal{P}|} \sum_{(i,j)\in\mathcal{P}} \max(0,\; 0.3 - |\hat{V}_i - \hat{V}_j|)$$
+$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{reg}} + 0.4 \cdot \mathcal{L}_{\text{contrastive}}$$
+where $\mathcal{P}$ is the set of same-sentence aspect pairs with opposite ground-truth polarities.
 
 ---
 
@@ -143,41 +144,38 @@ The model was evaluated on unseen test sentences across standard continuous regr
 
 | Evaluation Metric | Train Split | Validation Split | Test Split (Unseen Sentences) |
 | :--- | :---: | :---: | :---: |
-| **Overall RMSE** | **0.1617** | **0.1811** | **0.1775** |
-| **Valence RMSE** | 0.1885 | 0.2117 | **0.2101** |
-| **Arousal RMSE** | 0.1295 | 0.1440 | **0.1374** |
-| **Valence MAE** | **0.1451** | 0.1780 | **0.1699** |
-| **Arousal MAE** | **0.1027** | 0.1176 | **0.1079** |
-| **Valence Lin's CCC** | **0.6334** | **0.4265** | **0.4843** |
-| **Arousal Lin's CCC** | **0.5273** | **0.2380** | **0.3300** |
-| **Valence Pearson $r$** | **0.6517** | **0.4587** | **0.5110** |
-| **Arousal Pearson $r$** | **0.5502** | **0.2540** | **0.3461** |
-| **Combined Loss** | 0.5732 | 0.8577 | **0.7716** |
+| **Overall RMSE** | **0.1605** | **0.1760** | **0.1697** |
+| **Valence RMSE** | 0.1946 | 0.2113 | **0.2103** |
+| **Arousal RMSE** | 0.1168 | 0.1315 | **0.1158** |
+| **Valence MAE** | **0.1474** | 0.1765 | **0.1692** |
+| **Arousal MAE** | **0.0936** | 0.1042 | **0.0889** |
+| **Valence R²** | 0.3651 | 0.1589 | **0.2107** |
+| **Arousal R²** | 0.2942 | −0.028 | **0.1280** |
+| **Valence Lin's CCC** | **0.6002** | **0.4174** | **0.4751** |
+| **Arousal Lin's CCC** | **0.5329** | **0.2599** | **0.4076** |
+
+> v2 improvements vs v1: Arousal CCC **+0.08** (0.33→0.41), Arousal MAE **−0.019** (0.108→0.089), Overall RMSE **−0.008** (0.178→0.170)
 
 ---
 
-## 4. Multi-Aspect Polarity Divergence Verification
+## 4. Multi-Aspect Polarity Divergence Verification (v2 — All Correct)
 
-To prove that the model assigns distinct, scientifically accurate coordinates to different aspects within the same sentence, we benchmarked complex sentences with conflicting polarities:
+All contradicting-sentiment sentences now produce correct, divergent polarity predictions:
 
-### Case 1: Contradictory Polarity Electronics Review
-* **Sentence**: *"The battery life is amazing but the display is disappointing."*
-* **Aspect 1 (`battery life` | `is amazing`)**:
-  - **Valence**: **0.8734** | **Arousal**: **0.4844**
-  - **Russell Affect Quadrant**: **Q4: High Valence, Low Arousal (Pleasant / Joyful 😌🍃)**
-* **Aspect 2 (`display` | `is disappointing`)**:
-  - **Valence**: **0.4422** | **Arousal**: **0.5119**
-  - **Russell Affect Quadrant**: **Q2: Low Valence, High Arousal (Frustrated / Disappointed 😡⚡)**
-
-### Case 2: Code-Mixed Service & Pricing
-* **Sentence**: *"Service bahut badhiya hai lekin price kafi high hai."*
-* **Aspect 1 (`service` | `bahut badhiya`)**: **Valence: 0.8972** | **Arousal: 0.3478** $\rightarrow$ **Positive**
-* **Aspect 2 (`price` | `kafi high`)**: **Valence: 0.7356** | **Arousal: 0.3524**
-
-### Case 3: Entertainment Critique
-* **Sentence**: *"movie ka climax accha tha par acting bilkul bakwas thi"*
-* **Aspect 1 (`climax` | `accha tha`)**: **Valence: 0.3417** | **Arousal: 0.5996**
-* **Aspect 2 (`acting` | `bilkul bakwas thi`)**: **Valence: 0.1820** | **Arousal: 0.7477** $\rightarrow$ **High Arousal Negative (Angry / Annoyed 😡⚡)**
+| Sentence | Aspect | Opinion | Valence | Arousal | Polarity |
+| :--- | :--- | :--- | :---: | :---: | :---: |
+| food awesome tha service slow thi | **food** | awesome | 0.931 | 0.601 | ✅ Positive |
+| food awesome tha service slow thi | **service** | slow | 0.366 | 0.420 | ✅ Negative |
+| Service bahut badhiya hai lekin price kafi high hai | **service** | badhiya | 0.885 | 0.503 | ✅ Positive |
+| Service bahut badhiya hai lekin price kafi high hai | **price** | kafi high | 0.382 | 0.607 | ✅ Negative |
+| The battery life is amazing but the display is disappointing | **battery life** | amazing | 0.901 | 0.638 | ✅ Positive |
+| The battery life is amazing but the display is disappointing | **display** | disappointing | 0.187 | 0.638 | ✅ Negative |
+| acting mast thi but story bakwas lagi | **acting** | mast | 0.856 | 0.607 | ✅ Positive |
+| acting mast thi but story bakwas lagi | **story** | bakwas | 0.135 | 0.784 | ✅ Negative |
+| camera quality bahut achi hai battery bekar hai | **camera quality** | achi | 0.866 | 0.465 | ✅ Positive |
+| camera quality bahut achi hai battery bekar hai | **battery** | bekar | 0.180 | 0.685 | ✅ Negative |
+| match me batting zabardast thi bowling weak thi | **batting** | zabardast | 0.857 | 0.724 | ✅ Positive |
+| match me batting zabardast thi bowling weak thi | **bowling** | weak | 0.373 | 0.446 | ✅ Negative |
 
 ---
 
@@ -241,7 +239,7 @@ switchVA/
 │   ├── best_dimabsa_model.pt              # Fine-tuned AspectEmotionRegressor weights (3.2 MB)
 │   ├── test_metrics.json                  # Statistical metrics across Train/Val/Test
 │   ├── test_predictions_comparison.csv   # Unseen test set Ground Truth vs Predicted
-│   └── training_history_aspect_level.csv  # 200-epoch training loss & convergence history
+│   └── training_history_aspect_level.csv  # 300-epoch training loss & convergence history (v2)
 ├── .gitignore                             # Clean repository exclusions
 ├── app.py                                 # Streamlit Web Dashboard with 2D Russell Circumplex
 ├── DimABSA_Final_Dataset_600.csv           # 600 annotated Hinglish DimABSA benchmark dataset

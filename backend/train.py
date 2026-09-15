@@ -41,6 +41,47 @@ from backend.loss import (
     calculate_comprehensive_metrics,
 )
 
+
+def contrastive_pair_loss(pred_val, sample_ids, sentences, targets, margin=0.3):
+    """
+    For samples from the same sentence that have opposite true polarities
+    (one V>0.5, one V<0.5), penalize if their predicted valences are too close.
+    This forces the model to produce divergent predictions for contrastive aspects.
+    """
+    loss = torch.tensor(0.0, device=pred_val.device)
+    n = len(sample_ids)
+    count = 0
+    # Group by sentence prefix (sentence_id without aspect suffix)
+    sent_map = {}
+    for i, (sid, sent) in enumerate(zip(sample_ids, sentences)):
+        key = sent  # group by full sentence text
+        if key not in sent_map:
+            sent_map[key] = []
+        sent_map[key].append(i)
+
+    for indices in sent_map.values():
+        if len(indices) < 2:
+            continue
+        for i in range(len(indices)):
+            for j in range(i + 1, len(indices)):
+                ii, jj = indices[i], indices[j]
+                tv_i = targets[ii, 0]
+                tv_j = targets[jj, 0]
+                # Only penalize when true polarities differ
+                if (tv_i - 0.5) * (tv_j - 0.5) < 0:
+                    pv_i = pred_val[ii]
+                    pv_j = pred_val[jj]
+                    # Push predicted valences apart by at least `margin`
+                    gap = torch.abs(pv_i - pv_j)
+                    pair_loss = torch.clamp(margin - gap, min=0.0)
+                    loss = loss + pair_loss
+                    count += 1
+
+    if count > 0:
+        loss = loss / count
+    return loss
+
+
 FEATURE_CACHE_PATH = os.path.join(SAVE_DIR, "cached_aspect_features.pt")
 
 
@@ -154,7 +195,7 @@ def evaluate_feature_regressor(model, data, device):
 
 
 def train_aspect_emotion_regressor(
-    epochs: int = 200,
+    epochs: int = 300,
     lr: float = 1.5e-3,
     device: torch.device = DEVICE,
 ):
@@ -231,7 +272,12 @@ def train_aspect_emotion_regressor(
             target_aro=y_train[:, 1],
         )
 
-        loss = loss_dict["loss"]
+        # Contrastive pair penalty — push apart same-sentence opposite-polarity aspects
+        c_loss = contrastive_pair_loss(
+            outputs["valence"], train_data["sample_ids"], train_data["sentences"],
+            y_train, margin=0.30,
+        )
+        loss = loss_dict["loss"] + 0.4 * c_loss
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
         optimizer.step()
